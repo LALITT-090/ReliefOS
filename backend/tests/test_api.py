@@ -162,6 +162,29 @@ def test_stale_approval_conflict():
     })
     assert stale_res.status_code == 409
 
+    # The stale strategy must be PERSISTED as STALE (BR-014 traceability, must not roll back)
+    stale_detail = httpx.get(f"{BASE_URL}/strategies/{old_strat_id}")
+    assert stale_detail.status_code == 200
+    assert stale_detail.json()["strategy"]["status"] == "stale"
+
+    # A STRATEGY_STALE audit event must be persisted for this strategy
+    audit_res = httpx.get(f"{BASE_URL}/audit")
+    assert audit_res.status_code == 200
+    stale_events = [
+        e for e in audit_res.json()["events"]
+        if e["event_type"] == "strategy_stale" and e["entity_id"] == old_strat_id
+    ]
+    assert len(stale_events) == 1
+
+    # The stale approval must NOT have activated any allocation for the old strategy
+    alloc_res = httpx.get(f"{BASE_URL}/allocations")
+    assert alloc_res.status_code == 200
+    stale_activated = [
+        a for a in alloc_res.json()["allocations"]
+        if a["strategy_id"] == old_strat_id and a["status"] in ("approved", "dispatched", "in_transit")
+    ]
+    assert len(stale_activated) == 0
+
     # Re-plan against v2 and approve
     replan_res = httpx.post(f"{BASE_URL}/strategies/generate", json={"mode": "balanced"})
     new_strat_id = replan_res.json()["strategy_id"]

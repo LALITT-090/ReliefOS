@@ -193,6 +193,9 @@ async def api_approve_strategy(id: str, req: ApprovalRequest, db: AsyncSession =
     if strategy.state_version != scenario.state_version:
         strategy.status = StrategyStatus.STALE
         await audit_service.log_event(db, AuditEventType.STRATEGY_STALE, req.operator_id, "strategy", strategy.id, {"old_version": strategy.state_version, "current_version": scenario.state_version}, scenario.id)
+        # Persist the STALE status + audit event before rejecting.
+        # get_db() rolls back on exceptions, so raise-after-commit keeps traceability.
+        await db.commit()
         raise HTTPException(409, "Stale strategy - state has materially changed")
         
     if strategy.status != StrategyStatus.GENERATED:
@@ -271,6 +274,8 @@ async def api_modify_strategy(id: str, req: StrategyModifyRequest, db: AsyncSess
         
     if strategy.state_version != scenario.state_version:
         strategy.status = StrategyStatus.STALE
+        # Persist the STALE status before rejecting (same rollback consideration as approval).
+        await db.commit()
         raise HTTPException(409, "Cannot modify stale strategy — scenario state has changed")
         
     if strategy.status not in (StrategyStatus.GENERATED, StrategyStatus.STALE):

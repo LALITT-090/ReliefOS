@@ -157,8 +157,8 @@ export default function StrategyLab() {
               {strategies.map((item: any) => {
                 const s = item.strategy;
                 const isSelected = selectedStrategy?.strategy?.id === s.id;
-                const isApproved = s.status === "APPROVED";
-                const isStale = s.status === "STALE";
+                const isApproved = s.status?.toLowerCase() === "approved";
+                const isStale = s.status?.toLowerCase() === "stale";
 
                 return (
                   <div
@@ -263,8 +263,59 @@ export default function StrategyLab() {
                     <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
                       Deterministic Decision Rationale
                     </h4>
-                    <div className="p-3.5 bg-slate-950 rounded-lg border border-slate-800 text-xs text-slate-300 font-sans leading-relaxed max-h-72 overflow-y-auto whitespace-pre-wrap">
-                      {selectedStrategy.explanation || "No explanation text returned."}
+                    <div className="p-3.5 bg-slate-950 rounded-lg border border-slate-800 text-xs text-slate-300 font-sans leading-relaxed max-h-72 overflow-y-auto space-y-2">
+                      {typeof selectedStrategy.explanation === "string" ? (
+                        <p className="whitespace-pre-wrap">{selectedStrategy.explanation}</p>
+                      ) : selectedStrategy.explanation ? (
+                        <>
+                          <p className="font-semibold text-slate-200 leading-snug">
+                            {selectedStrategy.explanation.recommendation_summary || "No recommendation summary returned."}
+                          </p>
+                          {selectedStrategy.explanation.mode_rationale && (
+                            <p className="text-slate-400">{selectedStrategy.explanation.mode_rationale}</p>
+                          )}
+                          {selectedStrategy.explanation.factors?.length > 0 && (
+                            <div>
+                              <div className="font-bold uppercase tracking-wider text-teal-300 text-[10px]">Evidence Factors</div>
+                              <ul className="space-y-1 pl-3 list-disc">
+                                {selectedStrategy.explanation.factors.map((f: any, i: number) => (
+                                  <li key={i}>
+                                    <strong>{f.name || f.type || "Factor"}</strong>: {f.value}
+                                    {typeof f.contribution === "number" && (
+                                      <span className="text-slate-500"> (impact {f.contribution >= 0 ? "+" : ""}{f.contribution})</span>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {selectedStrategy.explanation.constraints?.length > 0 && (
+                            <div>
+                              <div className="font-bold uppercase tracking-wider text-blue-300 text-[10px]">Constraint Checks</div>
+                              <ul className="space-y-0.5">
+                                {selectedStrategy.explanation.constraints.map((c: any, i: number) => (
+                                  <li key={i} className="flex items-start gap-1.5">
+                                    <span className={c.passed ? "text-emerald-400" : "text-rose-400"}>{c.passed ? "OK:" : "FAIL:"}</span>
+                                    <span><strong>{c.name}</strong>: {c.detail}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {selectedStrategy.explanation.estimated_impact && (
+                            <div>
+                              <div className="font-bold uppercase tracking-wider text-amber-300 text-[10px]">Estimated Impact</div>
+                              <div className="space-y-0.5">
+                                {Object.entries(selectedStrategy.explanation.estimated_impact).map(([k, v]: [string, any]) => (
+                                  <div key={k}><span className="uppercase text-slate-500">{k.replace("_", " ")}:</span> {v}</div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <p>No explanation text returned.</p>
+                      )}
                     </div>
                   </div>
 
@@ -298,15 +349,15 @@ export default function StrategyLab() {
               <div className="mt-6 pt-4 border-t border-slate-700 flex gap-3">
                 <button
                   onClick={() => approveStrategy(selectedStrategy.strategy.id)}
-                  disabled={selectedStrategy.strategy.status === "APPROVED" || selectedStrategy.strategy.status === "REJECTED"}
+                  disabled={["approved", "rejected"].includes((selectedStrategy.strategy.status || "").toLowerCase())}
                   className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-sm flex items-center justify-center gap-2 transition disabled:opacity-50 disabled:bg-slate-700"
                 >
                   <Check size={18} />
-                  {selectedStrategy.strategy.status === "APPROVED"
+                  {(selectedStrategy.strategy.status || "").toLowerCase() === "approved"
                     ? "Strategy Already Approved"
                     : "Approve Strategy (Commit Allocations)"}
                 </button>
-                {selectedStrategy.strategy.status === "GENERATED" && (
+                {(selectedStrategy.strategy.status || "").toLowerCase() === "generated" && (
                   <button
                     onClick={() => rejectStrategy(selectedStrategy.strategy.id)}
                     className="px-4 py-3 bg-rose-950/70 hover:bg-rose-900 text-rose-200 border border-rose-800 rounded-lg font-semibold text-sm flex items-center justify-center gap-2 transition"
