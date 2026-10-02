@@ -1,0 +1,74 @@
+# ============================================================
+# ReliefOS root .gitignore
+# Covers: Python / FastAPI / SQLite / venv / Node / Next.js / secrets / logs / caches
+# ============================================================
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+*.so
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.pytest_cache/
+
+# ---------- Python virtual environments ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- SQLite / local database files (runtime-generated) ----------
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+
+# ---------- Node / Next.js ----------
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# ---------- Environment / secrets ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+*.crt
+*.secret
+secrets/
+credentials*
+
+# ---------- Logs ----------
+*.log
+npm-debug.log*
+logs/
+
+# ---------- Caches / temp / misc ----------
+.cache/
+*.tmp
+*.temp
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---------- Temporary QA output (verification scripts) ----------
+/tmp/
+qa-output/
+*.qa-out
