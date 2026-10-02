@@ -5,6 +5,7 @@ import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { useEffect, useState } from 'react';
 import axios from 'axios';
+import { API_BASE_URL } from '@/lib/api';
 
 const iconHospital = L.icon({
   iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
@@ -18,7 +19,7 @@ export default function MapComponent() {
 
   useEffect(() => {
     const loadData = () => {
-      axios.get("http://localhost:8000/api/v1/twin")
+      axios.get(`${API_BASE_URL}/v1/twin`)
         .then(res => setTwin(res.data))
         .catch(console.error);
     };

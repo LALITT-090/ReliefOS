@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import axios from "axios";
+import { API_BASE_URL } from "@/lib/api";
 import {
   TrendingUp,
   AlertTriangle,
@@ -64,8 +65,8 @@ export default function Predictions() {
   const loadData = async () => {
     try {
       const [predRes, twinRes] = await Promise.all([
-        axios.get("http://localhost:8000/api/v1/predictions"),
-        axios.get("http://localhost:8000/api/v1/twin")
+        axios.get(`${API_BASE_URL}/v1/predictions`),
+        axios.get(`${API_BASE_URL}/v1/twin`)
       ]);
       setPredictions(predRes.data.forecasts || []);
       setTwin(twinRes.data);

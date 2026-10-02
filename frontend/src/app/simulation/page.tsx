@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import axios from "axios";
+import { API_BASE_URL } from "@/lib/api";
 import { AlertOctagon, Activity, Truck, Package, MapPin, Zap, RefreshCcw, CheckCircle } from "lucide-react";
 
 export default function SimulationSandbox() {
@@ -11,7 +12,7 @@ export default function SimulationSandbox() {
   const triggerEvent = async (type: string, payload: any) => {
     setLoadingEvent(type);
     try {
-      const res = await axios.post("http://localhost:8000/api/v1/chaos/events", {
+      const res = await axios.post(`${API_BASE_URL}/v1/chaos/events`, {
         event_type: type,
         payload
       });
@@ -27,7 +28,7 @@ export default function SimulationSandbox() {
   const resetScenario = async () => {
     setLoadingEvent("reset");
     try {
-      const res = await axios.post("http://localhost:8000/api/v1/scenarios/00000000-0000-0000-0000-000000000001/load");
+      const res = await axios.post(`${API_BASE_URL}/v1/scenarios/00000000-0000-0000-0000-000000000001/load`);
       setResult({ status: "success", message: "Scenario reset to initial Urban Flood baseline state version 1", data: res.data });
     } catch (err: any) {
       console.error(err);

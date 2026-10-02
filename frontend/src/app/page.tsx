@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import axios from "axios";
+import { API_BASE_URL } from "@/lib/api";
 import {
   Activity,
   AlertTriangle,
@@ -36,10 +37,10 @@ export default function Overview() {
     if (isManual) setIsRefreshing(true);
     try {
       const [twinRes, allocRes, predRes, auditRes] = await Promise.all([
-        axios.get("http://localhost:8000/api/v1/twin"),
-        axios.get("http://localhost:8000/api/v1/allocations"),
-        axios.get("http://localhost:8000/api/v1/predictions"),
-        axios.get("http://localhost:8000/api/v1/audit")
+        axios.get(`${API_BASE_URL}/v1/twin`),
+        axios.get(`${API_BASE_URL}/v1/allocations`),
+        axios.get(`${API_BASE_URL}/v1/predictions`),
+        axios.get(`${API_BASE_URL}/v1/audit`)
       ]);
       setTwin(twinRes.data);
       setAllocations(allocRes.data.allocations || []);
@@ -51,8 +52,8 @@ export default function Overview() {
       if (err.response?.status === 404) {
         // Automatically ensure initial scenario is loaded if database was fresh
         try {
-          await axios.post("http://localhost:8000/api/v1/scenarios/00000000-0000-0000-0000-000000000001/load");
-          const retryRes = await axios.get("http://localhost:8000/api/v1/twin");
+          await axios.post(`${API_BASE_URL}/v1/scenarios/00000000-0000-0000-0000-000000000001/load`);
+          const retryRes = await axios.get(`${API_BASE_URL}/v1/twin`);
           setTwin(retryRes.data);
           setLoading(false);
         } catch (innerErr) {
@@ -83,7 +84,7 @@ export default function Overview() {
   if (!twin) {
     return (
       <div className="p-8 text-center text-red-400 bg-red-950/20 border border-red-800 rounded-lg">
-        Unable to load Digital Twin. Please ensure the backend is running at http://localhost:8000.
+        Unable to load Digital Twin. Please ensure the backend is running at {API_BASE_URL}.
       </div>
     );
   }

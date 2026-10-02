@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import axios from "axios";
+import { API_BASE_URL } from "@/lib/api";
 import { ShieldCheck, Clock, RefreshCw, Key, Hash, UserCheck } from "lucide-react";
 
 export default function AuditTimeline() {
@@ -10,7 +11,7 @@ export default function AuditTimeline() {
 
   const loadData = async () => {
     try {
-      const res = await axios.get("http://localhost:8000/api/v1/audit");
+      const res = await axios.get(`${API_BASE_URL}/v1/audit`);
       setEvents(res.data.events || []);
       setLoading(false);
     } catch (err) {

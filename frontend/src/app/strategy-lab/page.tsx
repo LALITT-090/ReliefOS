@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import axios from "axios";
+import { API_BASE_URL } from "@/lib/api";
 import {
   Check,
   X,
@@ -30,13 +31,13 @@ export default function StrategyLab() {
       const modes = ["baseline_nearest", "severity_first", "balanced", "coverage_first"];
       const results = await Promise.all(
         modes.map(mode =>
-          axios.post("http://localhost:8000/api/v1/strategies/generate", { mode })
+          axios.post(`${API_BASE_URL}/v1/strategies/generate`, { mode })
         )
       );
 
       const strategiesData = await Promise.all(
         results.map(res =>
-          axios.get(`http://localhost:8000/api/v1/strategies/${res.data.strategy_id}`)
+          axios.get(`${API_BASE_URL}/v1/strategies/${res.data.strategy_id}`)
         )
       );
 
@@ -54,13 +55,13 @@ export default function StrategyLab() {
 
   const approveStrategy = async (id: string) => {
     try {
-      await axios.post(`http://localhost:8000/api/v1/strategies/${id}/approve`, {
+      await axios.post(`${API_BASE_URL}/v1/strategies/${id}/approve`, {
         operator_action: "approved",
         operator_id: "Emergency Incident Commander"
       });
       setActionStatus({ type: "success", msg: "Strategy Approved! Active allocations have been committed to Digital Twin." });
       // Refresh selected strategy state
-      const res = await axios.get(`http://localhost:8000/api/v1/strategies/${id}`);
+      const res = await axios.get(`${API_BASE_URL}/v1/strategies/${id}`);
       setSelectedStrategy(res.data);
     } catch (err: any) {
       if (err.response?.status === 409) {
@@ -76,13 +77,13 @@ export default function StrategyLab() {
 
   const rejectStrategy = async (id: string) => {
     try {
-      await axios.post(`http://localhost:8000/api/v1/strategies/${id}/reject`, {
+      await axios.post(`${API_BASE_URL}/v1/strategies/${id}/reject`, {
         operator_action: "rejected",
         operator_id: "Emergency Incident Commander",
         operator_note: "Rejected by operator during evaluation"
       });
       setActionStatus({ type: "warning", msg: "Strategy Rejected. Proposed allocations cancelled." });
-      const res = await axios.get(`http://localhost:8000/api/v1/strategies/${id}`);
+      const res = await axios.get(`${API_BASE_URL}/v1/strategies/${id}`);
       setSelectedStrategy(res.data);
     } catch (err: any) {
       setActionStatus({ type: "error", msg: err.response?.data?.detail || "Failed to reject strategy." });

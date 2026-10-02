@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import axios from "axios";
+import { API_BASE_URL } from "@/lib/api";
 import {
   List,
   CheckCircle,
@@ -28,8 +29,8 @@ export default function ActiveAllocations() {
   const loadData = async () => {
     try {
       const [allocRes, twinRes] = await Promise.all([
-        axios.get("http://localhost:8000/api/v1/allocations"),
-        axios.get("http://localhost:8000/api/v1/twin")
+        axios.get(`${API_BASE_URL}/v1/allocations`),
+        axios.get(`${API_BASE_URL}/v1/twin`)
       ]);
       setAllocations(allocRes.data.allocations || []);
       setTwin(twinRes.data);
@@ -48,7 +49,7 @@ export default function ActiveAllocations() {
   const updateStatus = async (id: string, newStatus: string) => {
     setUpdatingId(id);
     try {
-      await axios.patch(`http://localhost:8000/api/v1/allocations/${id}/status`, {
+      await axios.patch(`${API_BASE_URL}/v1/allocations/${id}/status`, {
         status: newStatus
       });
       await loadData();
