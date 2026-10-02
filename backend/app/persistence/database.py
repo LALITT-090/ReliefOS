@@ -5,7 +5,13 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import Session
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./reliefos.db")
+def _get_default_database_url() -> str:
+    if os.getenv("VERCEL"):
+        return "sqlite+aiosqlite:////tmp/reliefos.db"
+    return "sqlite+aiosqlite:///./reliefos.db"
+
+
+DATABASE_URL = os.getenv("DATABASE_URL") or _get_default_database_url()
 
 engine = create_async_engine(
     DATABASE_URL,
