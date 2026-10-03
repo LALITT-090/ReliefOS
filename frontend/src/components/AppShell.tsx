@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import axios from "axios";
 import {
   Activity,
   ClipboardList,
@@ -15,7 +14,6 @@ import {
   Siren,
 } from "lucide-react";
 import { ReliefDataProvider, useReliefData } from "@/components/ReliefDataContext";
-import { API_BASE_URL } from "@/lib/api";
 
 const scenarios = [
   {
@@ -56,10 +54,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 }
 
 function ShellContent({ pathname, children }: { pathname: string; children: React.ReactNode }) {
-  const { twin, allocations, refreshSnapshot } = useReliefData();
+  const { twin, allocations, loadScenario: loadScenarioFromApi } = useReliefData();
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [scenarioLoading, setScenarioLoading] = useState(false);
-  const [scenarioStatus, setScenarioStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [scenarioStatus, setScenarioStatus] = useState<{ type: "success" | "error"; message: string; scenarioId?: string } | null>(null);
 
   useEffect(() => {
     setPendingPath(null);
@@ -68,7 +66,7 @@ function ShellContent({ pathname, children }: { pathname: string; children: Reac
 
   const scenarioName = twin?.scenario?.name || "Scenario status unavailable";
   const stateVersion = twin?.state_version;
-  const activeScenarioId = twin?.scenario?.id || scenarios[0].id;
+  const activeScenarioId = twin?.scenario?.id || "";
 
   const loadScenario = async (scenarioId: string) => {
     const selectedScenario = scenarios.find((scenario) => scenario.id === scenarioId);
@@ -80,22 +78,21 @@ function ShellContent({ pathname, children }: { pathname: string; children: Reac
 
     setScenarioLoading(true);
     setScenarioStatus(null);
-    let scenarioLoaded = false;
     try {
-      await axios.post(`${API_BASE_URL}/v1/scenarios/${scenarioId}/load`);
-      scenarioLoaded = true;
-      await refreshSnapshot(true);
-      setScenarioStatus({ type: "success", message: `${selectedScenario.name} loaded at its deterministic baseline.` });
+      const loadedScenario = await loadScenarioFromApi(scenarioId);
+      setScenarioStatus({
+        type: "success",
+        message: `${loadedScenario.scenario_name} loaded at its deterministic baseline.`,
+        scenarioId: loadedScenario.scenario_id,
+      });
     } catch (error: any) {
       setScenarioStatus({
         type: "error",
-        message: scenarioLoaded
-          ? `${selectedScenario.name} loaded, but its latest state could not be refreshed. Wait for the next refresh before continuing.`
-          : error.response?.data?.detail || `Could not load ${selectedScenario.name}. The active scenario was not changed.`,
+        message: error.response?.data?.detail || error.message || `Could not load ${selectedScenario.name}. The active scenario was not changed.`,
+        scenarioId: twin?.scenario?.id,
       });
-    } finally {
-      setScenarioLoading(false);
     }
+    setScenarioLoading(false);
   };
 
   return (
@@ -162,6 +159,7 @@ function ShellContent({ pathname, children }: { pathname: string; children: Reac
                 disabled={scenarioLoading}
                 onChange={(event) => void loadScenario(event.target.value)}
               >
+                {!activeScenarioId && <option value="" disabled>Loading active scenario…</option>}
                 {scenarios.map((scenario) => (
                   <option key={scenario.id} value={scenario.id}>{scenario.name}</option>
                 ))}
@@ -180,7 +178,7 @@ function ShellContent({ pathname, children }: { pathname: string; children: Reac
             </div>
           </div>
         </header>
-        {scenarioStatus && (
+        {scenarioStatus && scenarioStatus.scenarioId === twin?.scenario?.id && (
           <div
             role={scenarioStatus.type === "error" ? "alert" : "status"}
             className={`mx-5 mt-3 rounded-lg border px-4 py-2 text-sm ${
@@ -192,7 +190,7 @@ function ShellContent({ pathname, children }: { pathname: string; children: Reac
             {scenarioStatus.message}
           </div>
         )}
-        <main className="app-content">{children}</main>
+        <main key={twin?.scenario?.id || "unloaded"} className="app-content">{children}</main>
       </div>
     </div>
   );

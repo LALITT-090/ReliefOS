@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { API_BASE_URL } from "@/lib/api";
 import { useReliefData } from "@/components/ReliefDataContext";
@@ -18,7 +18,9 @@ import {
 } from "lucide-react";
 
 export default function StrategyLab() {
-  const { refreshSnapshot } = useReliefData();
+  const { twin, refreshSnapshot } = useReliefData();
+  const activeScenarioRef = useRef(twin?.scenario);
+  activeScenarioRef.current = twin?.scenario;
   const [strategies, setStrategies] = useState<any[]>([]);
   const [selectedStrategy, setSelectedStrategy] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
@@ -28,8 +30,22 @@ export default function StrategyLab() {
   const [modifiedQuantities, setModifiedQuantities] = useState<Record<string, string>>({});
   const [operatorNote, setOperatorNote] = useState("");
   const [actionStatus, setActionStatus] = useState<{ type: "success" | "error" | "warning"; msg: string } | null>(null);
+  const scenarioVersionKey = `${twin?.scenario?.id || ""}:${twin?.state_version ?? ""}`;
+
+  useEffect(() => {
+    setStrategies([]);
+    setSelectedStrategy(null);
+    setActionStatus(null);
+    setModifyOpen(false);
+  }, [scenarioVersionKey]);
 
   const generateStrategies = async () => {
+    const requestedScenario = activeScenarioRef.current;
+    if (!requestedScenario?.id || requestedScenario.state_version == null) {
+      setActionStatus({ type: "error", msg: "No active scenario is confirmed. Refresh before generating strategies." });
+      return;
+    }
+
     setLoading(true);
     setStrategies([]);
     setSelectedStrategy(null);
@@ -38,7 +54,11 @@ export default function StrategyLab() {
       const modes = ["baseline_nearest", "severity_first", "balanced", "coverage_first"];
       const results = await Promise.all(
         modes.map(mode =>
-          axios.post(`${API_BASE_URL}/v1/strategies/generate`, { mode })
+          axios.post(`${API_BASE_URL}/v1/strategies/generate`, {
+            mode,
+            scenario_id: requestedScenario.id,
+            state_version: requestedScenario.state_version,
+          })
         )
       );
 
@@ -52,12 +72,35 @@ export default function StrategyLab() {
         ...res.data,
         optimizationResult: results[index].data.result,
       }));
+      const currentScenario = activeScenarioRef.current;
+      if (
+        currentScenario?.id !== requestedScenario.id ||
+        currentScenario?.state_version !== requestedScenario.state_version ||
+        fullData.some((item) =>
+          item.strategy?.scenario_id !== requestedScenario.id ||
+          item.strategy?.state_version !== requestedScenario.state_version
+        )
+      ) {
+        setStrategies([]);
+        setSelectedStrategy(null);
+        setActionStatus({ type: "warning", msg: "Scenario changed — generate a new strategy." });
+        setLoading(false);
+        return;
+      }
       setStrategies(fullData);
       if (fullData.length > 0) {
         setSelectedStrategy(fullData[2] || fullData[0]); // Default to balanced or first
       }
     } catch (err: any) {
-      setActionStatus({ type: "error", msg: err.response?.data?.detail || "Error generating optimization strategies" });
+      const changed = err.response?.status === 404 || err.response?.status === 409;
+      setStrategies([]);
+      setSelectedStrategy(null);
+      setActionStatus({
+        type: changed ? "warning" : "error",
+        msg: changed
+          ? "Scenario changed — generate a new strategy."
+          : err.response?.data?.detail || "Error generating optimization strategies",
+      });
     }
     setLoading(false);
   };
@@ -84,17 +127,16 @@ export default function StrategyLab() {
       }
     } catch (err: any) {
       if (err.response?.status === 409) {
+        setStrategies([]);
+        setSelectedStrategy(null);
         setActionStatus({
-          type: "error",
-          msg: "APPROVAL REJECTED (HTTP 409): Strategy is STALE. Digital Twin state has materially mutated since this strategy was calculated. Re-generate strategies to replan."
+          type: "warning",
+          msg: "Scenario changed — generate a new strategy."
         });
-        axios.get(`${API_BASE_URL}/v1/strategies/${id}`).then((res) => {
-          const refreshed = { ...res.data, optimizationResult: selectedStrategy?.optimizationResult };
-          setSelectedStrategy(refreshed);
-          setStrategies((current) => current.map((item) => item.strategy?.id === id ? refreshed : item));
-        }).catch(() => {
-          setActionStatus({ type: "warning", msg: "The strategy is stale, but its latest status could not be refreshed. Re-generate strategies before continuing." });
-        });
+      } else if (err.response?.status === 404) {
+        setStrategies([]);
+        setSelectedStrategy(null);
+        setActionStatus({ type: "warning", msg: "Scenario changed — generate a new strategy." });
       } else {
         setActionStatus({ type: "error", msg: err.response?.data?.detail || "Failed to approve strategy." });
       }

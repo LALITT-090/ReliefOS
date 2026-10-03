@@ -38,13 +38,25 @@ export default function Overview() {
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
 
   const fetchData = useCallback(async (isManual = false) => {
+    const scenarioId = twin?.scenario?.id;
+    const stateVersion = twin?.state_version;
+    if (!scenarioId || stateVersion == null) return;
     if (isManual) setIsRefreshing(true);
     try {
       const [, predRes, auditRes] = await Promise.all([
         refreshSnapshot(isManual),
-        axios.get(`${API_BASE_URL}/v1/predictions`),
-        axios.get(`${API_BASE_URL}/v1/audit`)
+        axios.get(`${API_BASE_URL}/v1/predictions`, {
+          params: { scenario_id: scenarioId, state_version: stateVersion },
+        }),
+        axios.get(`${API_BASE_URL}/v1/audit`, { params: { scenario_id: scenarioId } })
       ]);
+      if (
+        predRes.data.scenario_id !== scenarioId ||
+        predRes.data.state_version !== stateVersion ||
+        auditRes.data.scenario_id !== scenarioId
+      ) {
+        throw new Error("Overview data belongs to a different scenario state.");
+      }
       setPredictions(predRes.data.forecasts || []);
       setAudit(auditRes.data.events || []);
       setSupportingDataError(null);
@@ -56,7 +68,7 @@ export default function Overview() {
       setLoading(false);
       if (isManual) setIsRefreshing(false);
     }
-  }, [refreshSnapshot]);
+  }, [refreshSnapshot, twin?.scenario?.id, twin?.state_version]);
 
   useEffect(() => {
     fetchData();

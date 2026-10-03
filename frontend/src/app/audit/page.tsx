@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { API_BASE_URL } from "@/lib/api";
 import { ShieldCheck, Clock, RefreshCw, UserCheck, ShieldAlert, CheckCircle2, XCircle } from "lucide-react";
+import { useReliefData } from "@/components/ReliefDataContext";
 
 export default function AuditTimeline() {
+  const { twin } = useReliefData();
   const [events, setEvents] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState("all");
@@ -15,10 +17,15 @@ export default function AuditTimeline() {
   const requestRef = useRef<Promise<void> | null>(null);
 
   const loadData = useCallback(() => {
+    const scenarioId = twin?.scenario?.id;
+    if (!scenarioId) return Promise.resolve();
     if (requestRef.current) return requestRef.current;
 
-    const request = axios.get(`${API_BASE_URL}/v1/audit`)
+    const request = axios.get(`${API_BASE_URL}/v1/audit`, { params: { scenario_id: scenarioId } })
       .then((res) => {
+        if (res.data.scenario_id !== scenarioId) {
+          throw new Error("Audit response belongs to a different active scenario.");
+        }
         setEvents(res.data.events || []);
         setError(null);
       })
@@ -32,7 +39,7 @@ export default function AuditTimeline() {
 
     requestRef.current = request;
     return request;
-  }, []);
+  }, [twin?.scenario?.id]);
 
   useEffect(() => {
     void loadData();
@@ -43,7 +50,14 @@ export default function AuditTimeline() {
   const verifyChain = async () => {
     setVerificationLoading(true);
     try {
-      const res = await axios.get(`${API_BASE_URL}/v1/audit/verify`);
+      const scenarioId = twin?.scenario?.id;
+      if (!scenarioId) throw new Error("No active scenario is confirmed.");
+      const res = await axios.get(`${API_BASE_URL}/v1/audit/verify`, {
+        params: { scenario_id: scenarioId },
+      });
+      if (res.data.scenario_id !== scenarioId) {
+        throw new Error("Audit verification belongs to a different active scenario.");
+      }
       setVerification(res.data);
     } catch (err: any) {
       setVerification({ valid: false, error: err.response?.data?.detail || "Cryptographic verification could not be completed." });

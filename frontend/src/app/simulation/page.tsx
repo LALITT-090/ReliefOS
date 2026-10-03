@@ -8,7 +8,7 @@ import Link from "next/link";
 import { useReliefData } from "@/components/ReliefDataContext";
 
 export default function SimulationSandbox() {
-  const { twin, allocations, refreshSnapshot } = useReliefData();
+  const { twin, allocations, refreshSnapshot, loadScenario } = useReliefData();
   const [result, setResult] = useState<any>(null);
   const [replan, setReplan] = useState<any>(null);
   const [replanError, setReplanError] = useState<string | null>(null);
@@ -28,14 +28,29 @@ export default function SimulationSandbox() {
     try {
       const res = await axios.post(`${API_BASE_URL}/v1/chaos/events`, {
         event_type: type,
-        payload
+        payload,
+        scenario_id: twin?.scenario?.id,
+        state_version: twin?.state_version,
       });
+      const eventStateVersion = res.data.result?.new_state_version ?? res.data.state_version;
       const [snapshotResult, predictionsResult, auditResult] = await Promise.allSettled([
         refreshSnapshot(true),
-        axios.get(`${API_BASE_URL}/v1/predictions`),
-        axios.get(`${API_BASE_URL}/v1/audit`),
+        axios.get(`${API_BASE_URL}/v1/predictions`, {
+          params: {
+            scenario_id: res.data.scenario_id,
+            state_version: eventStateVersion,
+          },
+        }),
+        axios.get(`${API_BASE_URL}/v1/audit`, {
+          params: { scenario_id: res.data.scenario_id },
+        }),
       ]);
       const snapshot = snapshotResult.status === "fulfilled" ? snapshotResult.value : null;
+      const forecastsMatch = predictionsResult.status === "fulfilled" &&
+        predictionsResult.value.data.scenario_id === res.data.scenario_id &&
+        predictionsResult.value.data.state_version === eventStateVersion;
+      const auditMatches = auditResult.status === "fulfilled" &&
+        auditResult.value.data.scenario_id === res.data.scenario_id;
       setResult({
         eventType: type,
         eventLabel: type.replace(/_/g, " "),
@@ -51,13 +66,18 @@ export default function SimulationSandbox() {
             destination_name: allocation.destination_name,
             status: allocation.status,
           })),
-        predictions: predictionsResult.status === "fulfilled" ? predictionsResult.value.data.forecasts || [] : null,
-        auditEvents: auditResult.status === "fulfilled" ? auditResult.value.data.events || [] : null,
-        auditConfirmed: auditResult.status === "fulfilled" && auditResult.value.data.events?.some((event: any) =>
+        predictions: predictionsResult.status === "fulfilled" &&
+          predictionsResult.value.data.scenario_id === res.data.scenario_id &&
+          predictionsResult.value.data.state_version === eventStateVersion
+          ? predictionsResult.value.data.forecasts || [] : null,
+        auditEvents: auditMatches
+          ? auditResult.value.data.events || [] : null,
+        auditConfirmed: auditMatches &&
+          auditResult.value.data.events?.some((event: any) =>
           event.event_type === "chaos_event_applied" && event.payload_json?.event_type === type
         ),
         refreshError: snapshotResult.status === "rejected" ? "The event applied, but the latest state snapshot could not be refreshed." : null,
-        predictionsError: predictionsResult.status === "rejected" || auditResult.status === "rejected",
+        predictionsError: !forecastsMatch || !auditMatches,
       });
     } catch (err: any) {
       setEventError(`Event was not applied. ${err.response?.data?.detail || "The simulation service could not apply this event. Previous state is unchanged."}`);
@@ -70,13 +90,33 @@ export default function SimulationSandbox() {
     setLoadingReplan(true);
     setReplanError(null);
     try {
+      if (!twin?.scenario?.id || twin.state_version == null) {
+        throw new Error("No active scenario is confirmed. Refresh before replanning.");
+      }
+      const scenarioId = twin.scenario.id;
+      const stateVersion = twin.state_version;
       const response = await axios.post(`${API_BASE_URL}/v1/strategies/generate`, {
         mode: "balanced",
+        scenario_id: scenarioId,
+        state_version: stateVersion,
       });
+      if (
+        response.data.scenario_id !== scenarioId ||
+        response.data.state_version !== stateVersion
+      ) {
+        throw new Error("Scenario changed — generate a new strategy.");
+      }
       const [detail, snapshot] = await Promise.all([
         axios.get(`${API_BASE_URL}/v1/strategies/${response.data.strategy_id}`),
         refreshSnapshot(true),
       ]);
+      if (
+        detail.data.strategy?.scenario_id !== scenarioId ||
+        detail.data.strategy?.state_version !== stateVersion ||
+        snapshot.twin?.scenario?.id !== scenarioId
+      ) {
+        throw new Error("Scenario changed — generate a new strategy.");
+      }
       setReplan({
         ...detail.data,
         optimizationResult: response.data.result,
@@ -156,23 +196,31 @@ export default function SimulationSandbox() {
       if (!twin?.scenario?.id) {
         throw new Error("No active scenario is available to reset.");
       }
-      const res = await axios.post(`${API_BASE_URL}/v1/scenarios/${twin.scenario.id}/load`);
-      const [snapshotResult, predictionsResult, auditResult] = await Promise.allSettled([
-        refreshSnapshot(true),
-        axios.get(`${API_BASE_URL}/v1/predictions`),
-        axios.get(`${API_BASE_URL}/v1/audit`),
+      const res = await loadScenario(twin.scenario.id);
+      const [predictionsResult, auditResult] = await Promise.allSettled([
+        axios.get(`${API_BASE_URL}/v1/predictions`, {
+          params: { scenario_id: res.scenario_id, state_version: res.state_version },
+        }),
+        axios.get(`${API_BASE_URL}/v1/audit`, {
+          params: { scenario_id: res.scenario_id },
+        }),
       ]);
+      const predictionsMatch = predictionsResult.status === "fulfilled" &&
+        predictionsResult.value.data.scenario_id === res.scenario_id &&
+        predictionsResult.value.data.state_version === res.state_version;
+      const auditMatches = auditResult.status === "fulfilled" &&
+        auditResult.value.data.scenario_id === res.scenario_id;
       setResult({
         kind: "reset",
         eventType: "scenario_reset",
         message: "Scenario reset to its initial simulated state.",
         stateVersionBefore: twin?.state_version ?? null,
-        stateVersionAfter: snapshotResult.status === "fulfilled" ? snapshotResult.value.twin?.state_version : res.data.state_version,
-        response: res.data,
-        predictions: predictionsResult.status === "fulfilled" ? predictionsResult.value.data.forecasts || [] : null,
-        auditEvents: auditResult.status === "fulfilled" ? auditResult.value.data.events || [] : null,
-        refreshError: snapshotResult.status === "rejected" ? "Scenario reset completed, but the latest state snapshot could not be refreshed." : null,
-        predictionsError: predictionsResult.status === "rejected" || auditResult.status === "rejected",
+        stateVersionAfter: res.state_version,
+        response: res,
+        predictions: predictionsMatch ? predictionsResult.value.data.forecasts || [] : null,
+        auditEvents: auditMatches ? auditResult.value.data.events || [] : null,
+        refreshError: null,
+        predictionsError: !predictionsMatch || !auditMatches,
       });
     } catch (err: any) {
       setEventError(`Scenario reset was not completed. ${err.response?.data?.detail || err.message || "The previous simulation state remains in place."}`);

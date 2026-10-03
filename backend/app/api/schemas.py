@@ -11,6 +11,8 @@ class IncidentCreate(BaseModel):
 
 class StrategyGenerateRequest(BaseModel):
     mode: str = "balanced"
+    scenario_id: Optional[str] = None
+    state_version: Optional[int] = None
 
     @field_validator("mode")
     @classmethod
@@ -24,6 +26,8 @@ class StrategyGenerateRequest(BaseModel):
 class ChaosEventRequest(BaseModel):
     event_type: str
     payload: Dict[str, Any]
+    scenario_id: Optional[str] = None
+    state_version: Optional[int] = None
 
 class ApprovalRequest(BaseModel):
     operator_action: str = "approved"

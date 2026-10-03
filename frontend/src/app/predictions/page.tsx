@@ -61,10 +61,21 @@ export default function Predictions() {
   const requestRef = useRef<Promise<void> | null>(null);
 
   const loadData = useCallback(() => {
+    const scenarioId = twin?.scenario?.id;
+    const stateVersion = twin?.state_version;
+    if (!scenarioId || stateVersion == null) return Promise.resolve();
     if (requestRef.current) return requestRef.current;
 
-    const request = axios.get(`${API_BASE_URL}/v1/predictions`)
+    const request = axios.get(`${API_BASE_URL}/v1/predictions`, {
+      params: { scenario_id: scenarioId, state_version: stateVersion },
+    })
       .then((predRes) => {
+        if (
+          predRes.data.scenario_id !== scenarioId ||
+          predRes.data.state_version !== stateVersion
+        ) {
+          throw new Error("Forecast response belongs to a different scenario state.");
+        }
         setPredictions(predRes.data.forecasts || []);
         setLoadError(null);
       })
@@ -78,7 +89,7 @@ export default function Predictions() {
 
     requestRef.current = request;
     return request;
-  }, []);
+  }, [twin?.scenario?.id, twin?.state_version]);
 
   useEffect(() => {
     void loadData();

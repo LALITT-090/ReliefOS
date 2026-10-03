@@ -21,6 +21,9 @@ def test_clean_load_scenario_deterministic():
         assert data["status"] == "success"
         assert data["scenario_id"] == SCENARIO_ID
         assert data["state_version"] == 1
+        assert data["snapshot"]["scenario"]["id"] == SCENARIO_ID
+        assert data["snapshot"]["state_version"] == 1
+        assert data["allocations"] == []
 
 def test_both_scenario_configurations_load_and_reset():
     """Both configured scenarios have complete, reproducible operational state."""
@@ -31,6 +34,9 @@ def test_both_scenario_configurations_load_and_reset():
         loaded = httpx.post(f"{BASE_URL}/scenarios/{scenario_id}/load")
         assert loaded.status_code == 200
         assert loaded.json()["scenario_id"] == scenario_id
+        assert loaded.json()["snapshot"]["scenario"]["id"] == scenario_id
+        assert loaded.json()["snapshot"]["state_version"] == 1
+        assert loaded.json()["allocations"] == []
 
         twin = httpx.get(f"{BASE_URL}/twin").json()
         assert twin["scenario"]["id"] == scenario_id
@@ -47,6 +53,46 @@ def test_both_scenario_configurations_load_and_reset():
         strategy = httpx.post(f"{BASE_URL}/strategies/generate", json={"mode": "balanced"})
         assert strategy.status_code == 200
         assert strategy.json()["result"]["is_feasible"] is True
+        assert strategy.json()["scenario_id"] == scenario_id
+        assert strategy.json()["state_version"] == 1
+
+        other_scenario_id = (
+            EARTHQUAKE_SCENARIO_ID
+            if scenario_id == SCENARIO_ID
+            else SCENARIO_ID
+        )
+        stale_strategy_request = httpx.post(
+            f"{BASE_URL}/strategies/generate",
+            json={
+                "mode": "balanced",
+                "scenario_id": other_scenario_id,
+                "state_version": 1,
+            },
+        )
+        assert stale_strategy_request.status_code == 409
+
+        stale_event_request = httpx.post(
+            f"{BASE_URL}/chaos/events",
+            json={
+                "event_type": "demand_spike",
+                "scenario_id": other_scenario_id,
+                "state_version": 1,
+                "payload": {
+                    "zone_id": twin["zones"][0]["id"],
+                    "resource_type": "ambulance",
+                    "increase_amount": 1,
+                },
+            },
+        )
+        assert stale_event_request.status_code == 409
+
+        forecasts = httpx.get(
+            f"{BASE_URL}/predictions",
+            params={"scenario_id": scenario_id, "state_version": 1},
+        )
+        assert forecasts.status_code == 200
+        assert forecasts.json()["scenario_id"] == scenario_id
+        assert forecasts.json()["state_version"] == 1
 
         changed = httpx.post(f"{BASE_URL}/chaos/events", json={
             "event_type": "road_block",
@@ -120,6 +166,8 @@ def test_predictions_engine():
     """Verify predictions engine returns T+30, T+60, T+120 forecast vectors."""
     response = httpx.get(f"{BASE_URL}/predictions")
     assert response.status_code == 200
+    assert response.json()["scenario_id"] == SCENARIO_ID
+    assert response.json()["state_version"] == 1
     forecasts = response.json().get("forecasts", [])
     assert len(forecasts) > 0
     horizons = set(f["horizon_min"] for f in forecasts)
@@ -131,6 +179,11 @@ def test_predictions_engine():
         assert 0.0 <= f["confidence"] <= 1.0
     repeated = httpx.get(f"{BASE_URL}/predictions").json()["forecasts"]
     assert forecasts == repeated
+    stale = httpx.get(
+        f"{BASE_URL}/predictions",
+        params={"scenario_id": EARTHQUAKE_SCENARIO_ID, "state_version": 1},
+    )
+    assert stale.status_code == 409
 
 def test_road_block_replan_uses_only_open_network_edges():
     """A revised approved route must not traverse a blocked road edge."""

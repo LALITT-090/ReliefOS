@@ -1,7 +1,7 @@
 import uuid
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import and_, or_, select
 
@@ -32,12 +32,15 @@ async def api_load_scenario(id: str, db: AsyncSession = Depends(get_db)):
         scenario = await load_scenario(db, id)
     except ValueError as error:
         raise HTTPException(404, str(error))
+    snapshot = await digital_twin_service.get_twin_snapshot(db)
     return {
         "status": "success",
         "scenario_id": scenario.id,
         "scenario_name": scenario.name,
         "disaster_type": scenario.disaster_type,
         "state_version": scenario.state_version,
+        "snapshot": snapshot,
+        "allocations": [],
     }
 
 @router.get("/twin")
@@ -67,14 +70,26 @@ async def api_parse_incident(text: str, db: AsyncSession = Depends(get_db)):
     return {"status": "success", "message": "Parsed (deterministic template)"}
 
 @router.get("/predictions")
-async def api_get_predictions(db: AsyncSession = Depends(get_db)):
+async def api_get_predictions(
+    scenario_id: Optional[str] = Query(default=None),
+    state_version: Optional[int] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
     twin = await digital_twin_service.get_twin_snapshot(db)
     if "error" in twin:
         raise HTTPException(status_code=404, detail=twin["error"])
+    if scenario_id is not None and scenario_id != twin["scenario"]["id"]:
+        raise HTTPException(409, "Scenario changed — refresh predictions.")
+    if state_version is not None and state_version != twin["state_version"]:
+        raise HTTPException(409, "Scenario state changed — refresh predictions.")
     
     inputs = build_forecast_inputs_from_twin(twin)
     forecasts = prediction_engine.predict_all(inputs, twin["state_version"])
-    return {"forecasts": [f.__dict__ for f in forecasts]}
+    return {
+        "scenario_id": twin["scenario"]["id"],
+        "state_version": twin["state_version"],
+        "forecasts": [f.__dict__ for f in forecasts],
+    }
 
 @router.post("/strategies/generate")
 async def api_generate_strategies(req: StrategyGenerateRequest, db: AsyncSession = Depends(get_db)):
@@ -84,6 +99,10 @@ async def api_generate_strategies(req: StrategyGenerateRequest, db: AsyncSession
 
     scenario_id = twin["scenario"]["id"]
     state_version = twin["state_version"]
+    if req.scenario_id is not None and req.scenario_id != scenario_id:
+        raise HTTPException(409, "Scenario changed — generate a new strategy.")
+    if req.state_version is not None and req.state_version != state_version:
+        raise HTTPException(409, "Scenario state changed — generate a new strategy.")
     latest_event_result = await db.execute(
         select(AuditEvent)
         .where(
@@ -225,7 +244,12 @@ async def api_generate_strategies(req: StrategyGenerateRequest, db: AsyncSession
             scenario_id,
         )
     
-    return {"strategy_id": strategy.id, "result": res.__dict__}
+    return {
+        "strategy_id": strategy.id,
+        "scenario_id": scenario_id,
+        "state_version": state_version,
+        "result": res.__dict__,
+    }
 
 @router.get("/strategies/{id}")
 async def api_get_strategy(id: str, db: AsyncSession = Depends(get_db)):
@@ -233,7 +257,6 @@ async def api_get_strategy(id: str, db: AsyncSession = Depends(get_db)):
     strategy = result.scalar_one_or_none()
     if not strategy:
         raise HTTPException(404, "Strategy not found")
-        
     result_allocs = await db.execute(select(Allocation).where(Allocation.strategy_id == id))
     allocs = result_allocs.scalars().all()
     result_evidence = await db.execute(
@@ -272,7 +295,8 @@ async def api_get_strategy(id: str, db: AsyncSession = Depends(get_db)):
     decision = decision_result.scalar_one_or_none()
     return {
         "strategy": {
-            "id": strategy.id, "mode": strategy.objective_mode, "score": strategy.score,
+            "id": strategy.id, "scenario_id": strategy.scenario_id,
+            "mode": strategy.objective_mode, "score": strategy.score,
             "coverage_pct": strategy.coverage_pct,
             "unmet_demand": strategy.unmet_demand,
             "avg_eta_min": strategy.avg_eta_min,
@@ -501,6 +525,10 @@ async def api_chaos_event(req: ChaosEventRequest, db: AsyncSession = Depends(get
     scenario = await digital_twin_service.get_active_scenario(db)
     if not scenario:
         raise HTTPException(404, "No active scenario")
+    if req.scenario_id is not None and req.scenario_id != scenario.id:
+        raise HTTPException(409, "Scenario changed — reload the simulation before applying an event.")
+    if req.state_version is not None and req.state_version != scenario.state_version:
+        raise HTTPException(409, "Scenario state changed — refresh the simulation before applying an event.")
         
     try:
         res = None
@@ -565,6 +593,8 @@ async def api_chaos_event(req: ChaosEventRequest, db: AsyncSession = Depends(get
         )
         return {
             "status": "success",
+            "scenario_id": scenario.id,
+            "state_version": scenario.state_version,
             "result": res,
             "event_id": chaos_audit_event.id,
             "impacted_count": len(impacted),
@@ -638,7 +668,7 @@ async def api_get_allocations(db: AsyncSession = Depends(get_db)):
             "updated_at": a.updated_at.isoformat() if a.updated_at else None,
         })
         
-    return {"allocations": enriched}
+    return {"scenario_id": scenario.id, "allocations": enriched}
 
 @router.get("/allocations/{id}/passport")
 async def api_get_resource_passport(id: str, db: AsyncSession = Depends(get_db)):
@@ -648,6 +678,9 @@ async def api_get_resource_passport(id: str, db: AsyncSession = Depends(get_db))
     allocation = allocation_result.scalar_one_or_none()
     if not allocation:
         raise HTTPException(404, "Allocation not found")
+    active_scenario = await digital_twin_service.get_active_scenario(db)
+    if not active_scenario or allocation.scenario_id != active_scenario.id:
+        raise HTTPException(409, "Scenario changed — select an allocation from the active scenario.")
     passport_result = await db.execute(
         select(ResourcePassport).where(
             ResourcePassport.allocation_id == allocation.id
@@ -781,6 +814,9 @@ async def api_update_allocation_status(id: str, req: AllocationStatusUpdate, db:
     if not alloc:
         raise HTTPException(404, "Allocation not found")
     scenario = await digital_twin_service.get_active_scenario(db)
+    if not scenario or alloc.scenario_id != scenario.id:
+        raise HTTPException(409, "Scenario changed — refresh the active allocations.")
+    scenario = await digital_twin_service.get_active_scenario(db)
     if not scenario or scenario.id != alloc.scenario_id:
         raise HTTPException(409, "Allocation does not belong to the active scenario")
     passport_result = await db.execute(
@@ -841,20 +877,30 @@ async def api_update_allocation_status(id: str, req: AllocationStatusUpdate, db:
     }
 
 @router.get("/audit")
-async def api_get_audit(db: AsyncSession = Depends(get_db)):
+async def api_get_audit(
+    scenario_id: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
     scenario = await digital_twin_service.get_active_scenario(db)
     if not scenario:
-        return {"events": []}
+        return {"scenario_id": None, "events": []}
+    if scenario_id is not None and scenario_id != scenario.id:
+        raise HTTPException(409, "Scenario changed — refresh the audit timeline.")
     events = await audit_service.get_events(db, scenario_id=scenario.id)
-    return {"events": events}
+    return {"scenario_id": scenario.id, "events": events}
 
 @router.get("/audit/verify")
-async def api_verify_audit(db: AsyncSession = Depends(get_db)):
+async def api_verify_audit(
+    scenario_id: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
     scenario = await digital_twin_service.get_active_scenario(db)
     if not scenario:
-        return {"valid": True, "event_count": 0, "errors": []}
+        return {"scenario_id": None, "valid": True, "event_count": 0, "errors": []}
+    if scenario_id is not None and scenario_id != scenario.id:
+        raise HTTPException(409, "Scenario changed — verify the active scenario audit chain.")
     verification = await audit_service.verify_chain(db, scenario_id=scenario.id)
-    return verification
+    return {"scenario_id": scenario.id, **verification}
 
 @router.get("/health")
 async def api_health():
