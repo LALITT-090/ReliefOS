@@ -91,6 +91,45 @@ async def api_get_predictions(
         "forecasts": [f.__dict__ for f in forecasts],
     }
 
+STRATEGY_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
+def make_deterministic_strategy_id(scenario_id: str, state_version: int, mode: str) -> str:
+    return str(uuid.uuid5(STRATEGY_NAMESPACE, f"{scenario_id}:{state_version}:{mode}"))
+
+async def get_or_hydrate_strategy(db: AsyncSession, id: str) -> Optional[Strategy]:
+    result = await db.execute(select(Strategy).where(Strategy.id == id))
+    strategy = result.scalar_one_or_none()
+    if strategy:
+        return strategy
+
+    twin = await digital_twin_service.get_twin_snapshot(db)
+    if "error" in twin:
+        return None
+
+    scenario_id = twin["scenario"]["id"]
+    state_version = twin["state_version"]
+    modes = ["baseline_nearest", "severity_first", "balanced", "coverage_first"]
+
+    matched_mode = None
+    for mode in modes:
+        if make_deterministic_strategy_id(scenario_id, state_version, mode) == id:
+            matched_mode = mode
+            break
+
+    if matched_mode:
+        await api_generate_strategies(
+            StrategyGenerateRequest(
+                mode=matched_mode,
+                scenario_id=scenario_id,
+                state_version=state_version,
+            ),
+            db=db,
+        )
+        result = await db.execute(select(Strategy).where(Strategy.id == id))
+        return result.scalar_one_or_none()
+
+    return None
+
 @router.post("/strategies/generate")
 async def api_generate_strategies(req: StrategyGenerateRequest, db: AsyncSession = Depends(get_db)):
     twin = await digital_twin_service.get_twin_snapshot(db)
@@ -103,6 +142,29 @@ async def api_generate_strategies(req: StrategyGenerateRequest, db: AsyncSession
         raise HTTPException(409, "Scenario changed — generate a new strategy.")
     if req.state_version is not None and req.state_version != state_version:
         raise HTTPException(409, "Scenario state changed — generate a new strategy.")
+
+    strategy_id = make_deterministic_strategy_id(scenario_id, state_version, req.mode)
+
+    existing_result = await db.execute(select(Strategy).where(Strategy.id == strategy_id))
+    existing_strategy = existing_result.scalar_one_or_none()
+    if existing_strategy:
+        return {
+            "strategy_id": existing_strategy.id,
+            "scenario_id": scenario_id,
+            "state_version": state_version,
+            "result": {
+                "mode": existing_strategy.objective_mode,
+                "score": existing_strategy.score,
+                "coverage_pct": existing_strategy.coverage_pct,
+                "unmet_demand": existing_strategy.unmet_demand,
+                "avg_eta_min": existing_strategy.avg_eta_min,
+                "avg_risk": existing_strategy.avg_risk,
+                "predicted_shortage_impact": existing_strategy.predicted_shortage_impact,
+                "is_feasible": existing_strategy.is_feasible,
+                "infeasibility_reason": existing_strategy.infeasibility_reason,
+            },
+        }
+
     latest_event_result = await db.execute(
         select(AuditEvent)
         .where(
@@ -153,7 +215,7 @@ async def api_generate_strategies(req: StrategyGenerateRequest, db: AsyncSession
     res = optimization_engine.generate_strategy(opt_input)
     
     strategy = Strategy(
-        id=str(uuid.uuid4()), scenario_id=scenario_id, state_version=state_version,
+        id=strategy_id, scenario_id=scenario_id, state_version=state_version,
         objective_mode=req.mode, status=StrategyStatus.GENERATED,
         score=res.score, coverage_pct=res.coverage_pct, unmet_demand=res.unmet_demand,
         avg_eta_min=res.avg_eta_min, avg_risk=res.avg_risk, predicted_shortage_impact=res.predicted_shortage_impact,
@@ -253,8 +315,7 @@ async def api_generate_strategies(req: StrategyGenerateRequest, db: AsyncSession
 
 @router.get("/strategies/{id}")
 async def api_get_strategy(id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Strategy).where(Strategy.id == id))
-    strategy = result.scalar_one_or_none()
+    strategy = await get_or_hydrate_strategy(db, id)
     if not strategy:
         raise HTTPException(404, "Strategy not found")
     result_allocs = await db.execute(select(Allocation).where(Allocation.strategy_id == id))
@@ -316,8 +377,7 @@ async def api_get_strategy(id: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/strategies/{id}/approve")
 async def api_approve_strategy(id: str, req: ApprovalRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Strategy).where(Strategy.id == id))
-    strategy = result.scalar_one_or_none()
+    strategy = await get_or_hydrate_strategy(db, id)
     if not strategy:
         raise HTTPException(404, "Strategy not found")
         
@@ -425,8 +485,7 @@ async def api_approve_strategy(id: str, req: ApprovalRequest, db: AsyncSession =
 
 @router.post("/strategies/{id}/reject")
 async def api_reject_strategy(id: str, req: ApprovalRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Strategy).where(Strategy.id == id))
-    strategy = result.scalar_one_or_none()
+    strategy = await get_or_hydrate_strategy(db, id)
     if not strategy:
         raise HTTPException(404, "Strategy not found")
 
@@ -452,8 +511,7 @@ async def api_reject_strategy(id: str, req: ApprovalRequest, db: AsyncSession = 
 
 @router.post("/strategies/{id}/modify")
 async def api_modify_strategy(id: str, req: StrategyModifyRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Strategy).where(Strategy.id == id))
-    strategy = result.scalar_one_or_none()
+    strategy = await get_or_hydrate_strategy(db, id)
     if not strategy:
         raise HTTPException(404, "Strategy not found")
         

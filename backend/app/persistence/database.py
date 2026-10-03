@@ -5,13 +5,20 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import Session
 import os
 
-def _get_default_database_url() -> str:
+def _get_database_url() -> str:
+    url = os.getenv("DATABASE_URL")
+    if url:
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif url.startswith("postgresql://") and not url.startswith("postgresql+"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url
     if os.getenv("VERCEL"):
         return "sqlite+aiosqlite:////tmp/reliefos.db"
     return "sqlite+aiosqlite:///./reliefos.db"
 
 
-DATABASE_URL = os.getenv("DATABASE_URL") or _get_default_database_url()
+DATABASE_URL = _get_database_url()
 
 engine = create_async_engine(
     DATABASE_URL,

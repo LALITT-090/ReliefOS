@@ -30,11 +30,22 @@ class DigitalTwinService:
     """
 
     async def get_active_scenario(self, db: AsyncSession) -> Optional[Scenario]:
-        """Get the currently active scenario."""
+        """Get the currently active scenario, auto-seeding baseline if none active."""
         result = await db.execute(
             select(Scenario).where(Scenario.status == ScenarioStatus.ACTIVE).limit(1)
         )
-        return result.scalar_one_or_none()
+        scenario = result.scalar_one_or_none()
+        if not scenario:
+            any_res = await db.execute(select(Scenario).limit(1))
+            scenario = any_res.scalar_one_or_none()
+            if scenario:
+                scenario.status = ScenarioStatus.ACTIVE
+                await db.flush()
+            else:
+                from app.persistence.scenario_seeder import load_scenario
+                from app.persistence.seed_data import SCENARIO_ID
+                scenario = await load_scenario(db, SCENARIO_ID)
+        return scenario
 
     async def get_twin_snapshot(self, db: AsyncSession) -> dict:
         """
