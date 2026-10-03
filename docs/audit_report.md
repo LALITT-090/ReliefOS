@@ -1,5 +1,7 @@
 # ReliefOS Compliance Audit & Matrix
 
+> Historical snapshot: the optimizer and environment findings below predate the current deterministic min-cost-flow implementation. For the active solver and current behavior, see [environment_limitations.md](./environment_limitations.md) and the canonical architecture/TRD documents. This report is not a current coverage assessment.
+
 This document provides a strict compliance audit of the ReliefOS MVP prototype against the technical requirements (TRD), product requirements (PRD), and architectural constraints.
 
 ## 1. Environmental Blockers & Database

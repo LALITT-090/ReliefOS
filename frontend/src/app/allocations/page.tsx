@@ -24,6 +24,7 @@ export default function ActiveAllocations() {
   const { allocations, loading, error, refreshSnapshot } = useReliefData();
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [selectedPassport, setSelectedPassport] = useState<any | null>(null);
+  const [loadingPassportId, setLoadingPassportId] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<{ type: "success" | "warning" | "error"; text: string } | null>(null);
 
   const loadData = useCallback(async () => {
@@ -42,11 +43,12 @@ export default function ActiveAllocations() {
       await axios.patch(`${API_BASE_URL}/v1/allocations/${id}/status`, {
         status: newStatus
       });
-      if (selectedPassport?.id === id) {
-        setSelectedPassport((prev: any) => ({ ...prev, status: newStatus }));
-      }
       try {
         await refreshSnapshot(true);
+        if (selectedPassport?.allocation_id === id) {
+          const passport = await axios.get(`${API_BASE_URL}/v1/allocations/${id}/passport`);
+          setSelectedPassport(passport.data);
+        }
         setActionMessage({ type: "success", text: `Allocation updated to ${newStatus.replace("_", " ").toUpperCase()}.` });
       } catch {
         setActionMessage({ type: "warning", text: `Allocation updated to ${newStatus.replace("_", " ").toUpperCase()}, but its latest details could not be refreshed. Use refresh; listed records may be out of date.` });
@@ -55,6 +57,22 @@ export default function ActiveAllocations() {
       setActionMessage({ type: "error", text: err.response?.data?.detail || "The allocation status was not changed. Please retry." });
     } finally {
       setUpdatingId(null);
+    }
+  };
+
+  const inspectPassport = async (id: string) => {
+    setLoadingPassportId(id);
+    setActionMessage(null);
+    try {
+      const response = await axios.get(`${API_BASE_URL}/v1/allocations/${id}/passport`);
+      setSelectedPassport(response.data);
+    } catch (err: any) {
+      setActionMessage({
+        type: "error",
+        text: err.response?.data?.detail || "The Resource Passport could not be loaded.",
+      });
+    } finally {
+      setLoadingPassportId(null);
     }
   };
 
@@ -163,11 +181,11 @@ export default function ActiveAllocations() {
                 return (
                   <tr
                     key={alloc.id}
-                    onClick={() => setSelectedPassport(alloc)}
+                    onClick={() => void inspectPassport(alloc.id)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        setSelectedPassport(alloc);
+                        void inspectPassport(alloc.id);
                       }
                     }}
                     tabIndex={0}
@@ -175,7 +193,9 @@ export default function ActiveAllocations() {
                     className={`cursor-pointer transition ${isSelected ? "bg-blue-950/40 hover:bg-blue-950/50 border-l-4 border-l-blue-500" : "hover:bg-slate-700/30"}`}
                   >
                     <td className="px-5 py-4 text-xs font-semibold text-teal-800">
-                      <span title={`Passport ID: ${alloc.id}`}>View passport</span>
+                      <span title={`Passport ID: ${alloc.id}`}>
+                        {loadingPassportId === alloc.id ? "Loading passport…" : "View passport"}
+                      </span>
                     </td>
                     <td className="px-5 py-4">
                       <div className="font-semibold text-white">
@@ -280,6 +300,7 @@ export default function ActiveAllocations() {
               <div>Formulary Code: <strong className="text-teal-300">{selectedPassport.medicine_type_code || selectedPassport.medicine_type_name || "N/A (Standard Unit)"}</strong></div>
               <div>Quantity: <strong className="text-white font-mono">{selectedPassport.quantity} units</strong></div>
               <div>Source Facility: <strong className="text-slate-300">{selectedPassport.source_name || "Central Base"}</strong></div>
+              <div>Resource Reference: <strong className="break-all text-slate-300">{selectedPassport.resource_reference_id || selectedPassport.id}</strong></div>
             </div>
 
             <div className="bg-slate-900 p-4 rounded-lg border border-slate-700 space-y-2">
@@ -293,6 +314,9 @@ export default function ActiveAllocations() {
             <div className="bg-slate-900 p-4 rounded-lg border border-slate-700 space-y-2">
               <h3 className="font-bold text-slate-200 uppercase tracking-wider text-[11px]">Provenance & Audit</h3>
               <div>Strategy Reference: <strong className="text-blue-300 font-mono">{selectedPassport.strategy_id?.substring(0, 12)}</strong></div>
+              <div>Scenario / State: <strong className="text-slate-300">{selectedPassport.scenario_id} / v{selectedPassport.state_version}</strong></div>
+              <div>Approving Operator: <strong className="text-slate-300">{selectedPassport.approving_operator || "Awaiting approval"}</strong></div>
+              <div>Incident Event: <strong className="break-all text-slate-300">{selectedPassport.incident_event_id || "Baseline recommendation"}</strong></div>
               <div>Current Lifecycle Status: {getStatusBadge(selectedPassport.status)}</div>
               <div>Created At: <strong className="text-slate-400 font-mono">{selectedPassport.created_at ? new Date(selectedPassport.created_at).toLocaleString() : "--"}</strong></div>
               <div>Last Mutated: <strong className="text-slate-400 font-mono">{selectedPassport.updated_at ? new Date(selectedPassport.updated_at).toLocaleString() : "--"}</strong></div>
@@ -305,6 +329,39 @@ export default function ActiveAllocations() {
               <span className="font-mono text-slate-400">{selectedPassport.route_node_ids.join(" → ")}</span>
             </div>
           )}
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <section className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">Recorded lifecycle</h3>
+              <ol className="mt-2 space-y-2 text-xs text-slate-300">
+                {(selectedPassport.lifecycle || []).map((transition: any) => (
+                  <li key={transition.audit_event_id} className="border-l-2 border-teal-500 pl-2">
+                    <strong>{transition.to_status?.replace(/_/g, " ").toUpperCase()}</strong>
+                    {" · "}{transition.operator_id}{" · "}{transition.timestamp}
+                    <div className="break-all text-[10px] text-slate-500">Audit {transition.audit_event_id}</div>
+                  </li>
+                ))}
+              </ol>
+            </section>
+            <section className="rounded-lg border border-slate-700 bg-slate-900 p-4">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">Audit verification</h3>
+              <p className="mt-2 text-xs text-slate-300">
+                {selectedPassport.audit_chain?.valid
+                  ? `Hash chain verified · ${selectedPassport.audit_chain.event_count} events`
+                  : "Hash-chain verification failed"}
+              </p>
+              <ul className="mt-2 max-h-28 space-y-1 overflow-y-auto text-[10px] text-slate-500">
+                {(selectedPassport.audit_references || []).map((reference: any) => (
+                  <li key={reference.id} className="break-all">
+                    {reference.event_type}: {reference.id} · SHA-256 {reference.event_hash?.slice(0, 16)}…
+                  </li>
+                ))}
+              </ul>
+              <a href="/audit" className="mt-2 inline-flex items-center gap-1 text-xs font-bold text-teal-300 underline">
+                Open Audit Trail <ExternalLink size={12} />
+              </a>
+            </section>
+          </div>
         </div>
       )}
     </div>

@@ -427,6 +427,26 @@ class Allocation(Base):
     vehicle = relationship("Ambulance", foreign_keys=[vehicle_id])
     medicine_type = relationship("MedicineType", foreign_keys=[medicine_type_id])
     superseded_by = relationship("Allocation", foreign_keys=[superseded_by_id], remote_side="Allocation.id")
+    passport = relationship(
+        "ResourcePassport",
+        back_populates="allocation",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class ResourcePassport(Base):
+    __tablename__ = "resource_passports"
+
+    allocation_id = Column(String, ForeignKey("allocations.id"), primary_key=True)
+    scenario_id = Column(String, ForeignKey("scenarios.id"), nullable=False)
+    state_version = Column(Integer, nullable=False)
+    resource_reference_id = Column(String, nullable=False)
+    route_snapshot = Column(JSON, nullable=False)
+    incident_event_id = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    allocation = relationship("Allocation", back_populates="passport")
 
 
 # ─── DATA-015 DecisionEvidence ────────────────────────────────────────────────

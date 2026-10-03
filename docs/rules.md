@@ -20,8 +20,11 @@ An ambulance cannot hold conflicting active assignments.
 ### BR-006 — Route feasibility
 Blocked road edges cannot be part of an approved route.
 
-### BR-007 — Road distance
-Transport cost must use network/road distance or network travel time. Straight-line distance must not silently replace it.
+### BR-007 — Network route and synthetic ETA
+Transport cost must use the road graph; blocked edges are excluded. The
+prototype's ETA is a deterministic estimate from configured synthetic edge
+`base_travel_min` values, not live traffic or measured travel time. Straight-line
+distance must not silently replace network routing.
 
 ### BR-008 — Severity
 Severity must influence allocation priority through a documented optimization factor.
@@ -33,7 +36,9 @@ Predicted quantities are estimates and must remain visually/data-model distinct 
 Low-confidence prediction must not silently become a hard operational fact.
 
 ### BR-011 — Reallocation
-A material state change creates a new strategy/allocation version.
+A material state change invalidates stale strategies and requires a new
+recommendation. Applying replacement allocations still requires explicit human
+approval; a simulation event never reallocates automatically.
 
 ### BR-012 — No silent overwrite
 Superseded allocations remain in history.
@@ -42,7 +47,7 @@ Superseded allocations remain in history.
 A recommendation cannot become an active allocation without operator approval.
 
 ### BR-014 — Stale approval protection
-A strategy based on a materially older state version cannot be approved without revalidation.
+A strategy can be approved only when both its scenario ID and state version match the active Digital Twin. A strategy from another or materially changed scenario cannot be approved without regeneration.
 
 ### BR-015 — Audit
 Every state mutation and operator decision must have an audit record.
@@ -143,7 +148,7 @@ Simulation uses deterministic payloads in the primary demo.
 Simulation cannot bypass approval for allocation changes.
 
 ### SIM-004
-Reset restores the exact baseline state.
+Reset restores the exact baseline state for the selected scenario without activating another scenario's entities or audit chain.
 
 ### SIM-005
 A chaos event may intentionally create an infeasible condition; the system must report that condition safely.

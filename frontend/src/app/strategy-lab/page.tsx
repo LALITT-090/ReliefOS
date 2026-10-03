@@ -187,7 +187,7 @@ export default function StrategyLab() {
           className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold text-sm flex items-center gap-2 border border-blue-500 transition disabled:opacity-50"
         >
           <RefreshCw size={18} className={loading ? "animate-spin" : ""} />
-          {loading ? "Optimizing (OR Engine)..." : "Generate & Compare Strategies"}
+          {loading ? "Optimizing (Min-Cost Flow)..." : "Generate & Compare Strategies"}
         </button>
       </div>
 

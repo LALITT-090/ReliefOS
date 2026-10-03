@@ -469,6 +469,8 @@ For the MVP simulation, not every lifecycle transition needs to be physically re
 
 **Critical rule:** approval is required before the recommendation changes the active simulated allocation.
 
+An approval is valid only for a generated, feasible strategy from the currently active scenario and state version. Changing scenarios requires a newly generated recommendation; it does not carry approval across configurations.
+
 ---
 
 # 17. Resource Passport
@@ -525,6 +527,10 @@ The supplied PRD uses a deterministic urban-flood scenario as its primary demons
 - Synthetic affected population and demand.
 
 Exact quantities are demo configuration, not real-world evidence.
+
+## Alternate scenario: Earthquake
+
+A second complete synthetic configuration, **Earthquake — District Response**, is available for scenario switching and deterministic reset. It uses a distinct seed and entity identifiers, with the same operational resource classes and road-network model, but its own demand, facility-capacity and resource-stock values. Urban Flood remains the primary demo scenario.
 
 ### Demo sequence
 
@@ -646,24 +652,33 @@ Still required:
 | Styling | Tailwind CSS |
 | Map | Leaflet + OpenStreetMap-compatible tiles |
 | Backend | Python 3.11+ + FastAPI |
-| Optimization | Google OR-Tools |
-| Database | PostgreSQL; Supabase may host PostgreSQL |
-| Geo | PostGIS + predefined road graph/routing adapter |
+| Optimization | Deterministic min-cost flow over the synthetic scenario snapshot; no OR-Tools runtime dependency |
+| Database | SQLAlchemy-configured database; SQLite for the local prototype, PostgreSQL-compatible deployment option |
+| Geo | Predefined synthetic road graph; external GIS ingestion is out of MVP |
 | Prediction | Python + pandas; scikit-learn only if justified |
 | Validation | Pydantic |
-| Realtime | FastAPI WebSockets, optional after core loop |
+| Realtime | REST API for the MVP; WebSockets remain optional/future |
 | Testing | Pytest + Playwright |
 | Deployment | Vercel frontend + Render/Railway backend + managed PostgreSQL |
 | Version control | GitHub |
 | LLM | Optional adapter; no provider required for core MVP |
 
-The supplied PRD uses Next.js/React/TypeScript, FastAPI, OR-Tools, PostgreSQL/Supabase, Leaflet/OSM, Pydantic, Pytest/Playwright and Vercel/Render/Railway. fileciteturn3file0L484-L513
+The supplied PRD informed the intended stack, but this table records the current
+prototype implementation rather than implying that every suggested service is
+deployed or integrated. The optimizer assigns shared capacities through a
+deterministic min-cost-flow implementation. Its route ETA is based on synthetic
+edge `base_travel_min` values; it is not live traffic or measured travel.
+
+Resource Passport lifecycle transitions are operator-triggered simulation
+updates. They document the simulated workflow and are not GPS-confirmed or
+independently attested deliveries. fileciteturn3file0L484-L513
 
 ---
 
 # 26. Acceptance / Definition of Done
 
 - [ ] At least two scenario configurations exist; urban flood is the primary demo.
+- [ ] Scenario selection loads/resets the selected configuration without treating another scenario's state or approvals as current.
 - [ ] Scenario reset is deterministic.
 - [ ] Digital Twin is backend-authoritative.
 - [ ] Map displays core entities and road states.

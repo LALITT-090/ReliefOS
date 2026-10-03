@@ -6,6 +6,7 @@
 **Problem:** ELEVATE PS-02 / EL-02  
 **Primary demo:** Urban Flood  
 **Mode:** Software-only simulated decision-support platform
+**Configured scenarios:** Urban Flood — Metro District (seed 42, primary) and Earthquake — District Response (seed 99, alternate), with isolated deterministic operational data.
 
 ---
 
@@ -131,6 +132,23 @@ Exact quantities belong in scenario configuration files.
 - Medicine Shortage.
 - New Incident Zone.
 
+## Current implementation notes
+
+- Strategy generation uses deterministic min-cost flow across shared supply and
+  demand pools; assignment preferences include severity, urgency, predicted
+  shortage pressure, synthetic route ETA and route risk.
+- Route ETA uses configured synthetic road-edge `base_travel_min` values. It is
+  not live traffic or measured real-world travel.
+- Chaos events change the simulated Digital Twin but do not automatically
+  allocate resources. A human must generate, review and approve the replacement
+  strategy.
+- Resource Passport records link a persisted allocation lifecycle to its
+  scenario, strategy, route/resource snapshot and audit-event hashes. Lifecycle
+  transitions are operator-triggered simulation records, not physical delivery
+  attestations.
+- Audit verification checks the deterministic SHA-256 payload hash chain; it is
+  not blockchain, a digital signature, or tamper-proof storage.
+
 ---
 
 ## Strategy modes
@@ -188,7 +206,7 @@ Approval must be rejected/revalidated if the live state has materially changed.
 - Python.
 - FastAPI.
 - Pydantic.
-- OR-Tools.
+- Deterministic in-process min-cost flow (no OR-Tools runtime dependency).
 - PostgreSQL/PostGIS.
 - pandas.
 - optional scikit-learn.

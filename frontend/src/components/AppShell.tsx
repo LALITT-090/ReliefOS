@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import axios from "axios";
 import {
   Activity,
   ClipboardList,
@@ -14,6 +15,18 @@ import {
   Siren,
 } from "lucide-react";
 import { ReliefDataProvider, useReliefData } from "@/components/ReliefDataContext";
+import { API_BASE_URL } from "@/lib/api";
+
+const scenarios = [
+  {
+    id: "00000000-0000-0000-0000-000000000001",
+    name: "Urban Flood — Metro District",
+  },
+  {
+    id: "00000000-0000-0000-0000-000000000002",
+    name: "Earthquake — District Response",
+  },
+];
 
 const navigationGroups = [
   { label: "Situation", items: [
@@ -43,8 +56,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 }
 
 function ShellContent({ pathname, children }: { pathname: string; children: React.ReactNode }) {
-  const { twin, allocations } = useReliefData();
+  const { twin, allocations, refreshSnapshot } = useReliefData();
   const [pendingPath, setPendingPath] = useState<string | null>(null);
+  const [scenarioLoading, setScenarioLoading] = useState(false);
+  const [scenarioStatus, setScenarioStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   useEffect(() => {
     setPendingPath(null);
@@ -53,6 +68,35 @@ function ShellContent({ pathname, children }: { pathname: string; children: Reac
 
   const scenarioName = twin?.scenario?.name || "Scenario status unavailable";
   const stateVersion = twin?.state_version;
+  const activeScenarioId = twin?.scenario?.id || scenarios[0].id;
+
+  const loadScenario = async (scenarioId: string) => {
+    const selectedScenario = scenarios.find((scenario) => scenario.id === scenarioId);
+    if (!selectedScenario || scenarioId === activeScenarioId) return;
+    const confirmed = window.confirm(
+      `Load or reset ${selectedScenario.name}? This restores its deterministic baseline and clears that scenario's strategies, allocations, and audit history.`
+    );
+    if (!confirmed) return;
+
+    setScenarioLoading(true);
+    setScenarioStatus(null);
+    let scenarioLoaded = false;
+    try {
+      await axios.post(`${API_BASE_URL}/v1/scenarios/${scenarioId}/load`);
+      scenarioLoaded = true;
+      await refreshSnapshot(true);
+      setScenarioStatus({ type: "success", message: `${selectedScenario.name} loaded at its deterministic baseline.` });
+    } catch (error: any) {
+      setScenarioStatus({
+        type: "error",
+        message: scenarioLoaded
+          ? `${selectedScenario.name} loaded, but its latest state could not be refreshed. Wait for the next refresh before continuing.`
+          : error.response?.data?.detail || `Could not load ${selectedScenario.name}. The active scenario was not changed.`,
+      });
+    } finally {
+      setScenarioLoading(false);
+    }
+  };
 
   return (
     <div className="app-frame">
@@ -109,8 +153,19 @@ function ShellContent({ pathname, children }: { pathname: string; children: Reac
             <span className="text-sm font-bold text-slate-900">ReliefOS</span>
             <span className="hidden h-5 border-l border-slate-200 sm:block" />
             <div>
-              <div className="topbar-item-label">Active Scenario</div>
-              <div className="topbar-item-value max-w-[260px] truncate" title={scenarioName}>{scenarioName}</div>
+              <label className="topbar-item-label" htmlFor="active-scenario">Load / reset scenario</label>
+              <select
+                id="active-scenario"
+                aria-label="Load or reset active simulation scenario"
+                className="topbar-scenario-select"
+                value={activeScenarioId}
+                disabled={scenarioLoading}
+                onChange={(event) => void loadScenario(event.target.value)}
+              >
+                {scenarios.map((scenario) => (
+                  <option key={scenario.id} value={scenario.id}>{scenario.name}</option>
+                ))}
+              </select>
             </div>
           </div>
           <div className="topbar-meta">
@@ -125,6 +180,18 @@ function ShellContent({ pathname, children }: { pathname: string; children: Reac
             </div>
           </div>
         </header>
+        {scenarioStatus && (
+          <div
+            role={scenarioStatus.type === "error" ? "alert" : "status"}
+            className={`mx-5 mt-3 rounded-lg border px-4 py-2 text-sm ${
+              scenarioStatus.type === "error"
+                ? "border-rose-300 bg-rose-50 text-rose-800"
+                : "border-green-200 bg-green-50 text-green-800"
+            }`}
+          >
+            {scenarioStatus.message}
+          </div>
+        )}
         <main className="app-content">{children}</main>
       </div>
     </div>

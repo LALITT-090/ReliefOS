@@ -67,10 +67,10 @@ Implement `state_version`.
 Create seeded Urban Flood scenario.
 
 ### TASK-016
-Create at least one alternate disaster configuration.
+Create a complete deterministic alternate disaster configuration with isolated entities and operational data; Urban Flood remains the primary demo.
 
 ### TASK-017
-Implement scenario load/reset.
+Implement scenario selection and deterministic load/reset for both configured scenarios, including active-state and audit-history isolation.
 
 **Exit:** deterministic scenario appears in API.
 
@@ -282,7 +282,9 @@ Trigger re-planning from material impact.
 ### TASK-075
 Preserve before/after history.
 
-**Exit:** at least three chaos events visibly change recommendations.
+**Exit:** each of the six deterministic chaos events has an independent
+event → changed-state → replan → approval regression flow; applying an event
+alone never commits a replacement allocation.
 
 ---
 
@@ -419,6 +421,9 @@ Test prediction reproducibility.
 
 ### TASK-113
 Run full E2E demo.
+
+### TASK-121
+Run each of the six chaos events independently from baseline and reset the scenario after each event.
 
 ---
 

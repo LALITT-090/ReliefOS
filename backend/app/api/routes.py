@@ -3,18 +3,19 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from app.persistence.database import get_db
 from app.domain.services.digital_twin_service import digital_twin_service
-from app.persistence.scenario_seeder import load_scenario, SCENARIO_ID
+from app.persistence.scenario_seeder import load_scenario
 from app.forecasting.prediction_engine import PredictionEngine, build_forecast_inputs_from_twin
 from app.optimization.optimizer import OptimizationEngine, OptimizationInput, AmbulanceVar, DemandItem, SupplyItem
 from app.explanation.explanation_service import explanation_service
 from app.audit.audit_service import audit_service
 from app.domain.models.database import (
     Scenario, Strategy, Allocation, StrategyStatus, AllocationStatus,
-    AuditEventType, Decision, MedicineType, Zone, Hospital, Ambulance, ResourceSource
+    AuditEventType, Decision, DecisionEvidence, MedicineType, Zone, Hospital,
+    Ambulance, ResourceSource, ResourcePassport, AuditEvent, MedicineInventory
 )
 from app.api.schemas import (
     IncidentCreate, StrategyGenerateRequest, ChaosEventRequest,
@@ -27,10 +28,17 @@ optimization_engine = OptimizationEngine()
 
 @router.post("/scenarios/{id}/load")
 async def api_load_scenario(id: str, db: AsyncSession = Depends(get_db)):
-    if id != SCENARIO_ID:
-        id = SCENARIO_ID
-    scenario = await load_scenario(db, id)
-    return {"status": "success", "scenario_id": scenario.id, "state_version": scenario.state_version}
+    try:
+        scenario = await load_scenario(db, id)
+    except ValueError as error:
+        raise HTTPException(404, str(error))
+    return {
+        "status": "success",
+        "scenario_id": scenario.id,
+        "scenario_name": scenario.name,
+        "disaster_type": scenario.disaster_type,
+        "state_version": scenario.state_version,
+    }
 
 @router.get("/twin")
 async def api_get_twin(db: AsyncSession = Depends(get_db)):
@@ -76,6 +84,19 @@ async def api_generate_strategies(req: StrategyGenerateRequest, db: AsyncSession
 
     scenario_id = twin["scenario"]["id"]
     state_version = twin["state_version"]
+    latest_event_result = await db.execute(
+        select(AuditEvent)
+        .where(
+            AuditEvent.scenario_id == scenario_id,
+            AuditEvent.event_type.in_([
+                AuditEventType.CHAOS_EVENT_APPLIED,
+                AuditEventType.INCIDENT_CREATED,
+            ]),
+        )
+        .order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc())
+        .limit(1)
+    )
+    incident_event = latest_event_result.scalar_one_or_none()
     
     inputs = build_forecast_inputs_from_twin(twin)
     forecasts = [f.__dict__ for f in prediction_engine.predict_all(inputs, state_version)]
@@ -121,6 +142,17 @@ async def api_generate_strategies(req: StrategyGenerateRequest, db: AsyncSession
     )
     db.add(strategy)
     await db.flush()
+
+    for factor in res.evidence_factors:
+        db.add(DecisionEvidence(
+            id=str(uuid.uuid4()),
+            strategy_id=strategy.id,
+            factor_type=factor["factor_type"],
+            factor_name=factor["factor_name"],
+            value=factor.get("value"),
+            contribution=factor.get("contribution"),
+            source_ref=factor.get("source_ref"),
+        ))
     
     allocations_db = []
     for a in res.allocations:
@@ -137,10 +169,61 @@ async def api_generate_strategies(req: StrategyGenerateRequest, db: AsyncSession
     
     await db.flush()
     
-    await audit_service.log_event(
+    strategy_event = await audit_service.log_event(
         db, AuditEventType.STRATEGY_GENERATED, "system", "strategy", strategy.id,
-        {"mode": req.mode, "score": res.score, "is_feasible": res.is_feasible}, scenario_id
+        {
+            "mode": req.mode,
+            "score": res.score,
+            "is_feasible": res.is_feasible,
+            "incident_event_id": incident_event.id if incident_event else None,
+            "state_version": state_version,
+        },
+        scenario_id,
     )
+    inventory_by_source_and_type = {
+        (inventory["source_id"], inventory["medicine_type_id"]): inventory["id"]
+        for inventory in twin["medicine_inventory"]
+    }
+    for allocation in allocations_db:
+        resource_reference_id = (
+            allocation.vehicle_id
+            or inventory_by_source_and_type.get(
+                (allocation.source_id, allocation.medicine_type_id)
+            )
+            or allocation.destination_id
+            or allocation.id
+        )
+        db.add(ResourcePassport(
+            allocation_id=allocation.id,
+            scenario_id=scenario_id,
+            state_version=state_version,
+            resource_reference_id=resource_reference_id,
+            route_snapshot={
+                "node_ids": allocation.route_node_ids or [],
+                "distance_km": allocation.route_distance_km,
+                "estimated_travel_min": allocation.route_travel_min,
+                "risk": allocation.route_risk,
+            },
+            incident_event_id=incident_event.id if incident_event else None,
+        ))
+        await audit_service.log_event(
+            db,
+            AuditEventType.ALLOCATION_CREATED,
+            "system",
+            "allocation",
+            allocation.id,
+            {
+                "allocation_id": allocation.id,
+                "strategy_id": strategy.id,
+                "strategy_event_id": strategy_event.id,
+                "scenario_id": scenario_id,
+                "state_version": state_version,
+                "resource_reference_id": resource_reference_id,
+                "incident_event_id": incident_event.id if incident_event else None,
+                "status": AllocationStatus.PROPOSED.value,
+            },
+            scenario_id,
+        )
     
     return {"strategy_id": strategy.id, "result": res.__dict__}
 
@@ -153,6 +236,10 @@ async def api_get_strategy(id: str, db: AsyncSession = Depends(get_db)):
         
     result_allocs = await db.execute(select(Allocation).where(Allocation.strategy_id == id))
     allocs = result_allocs.scalars().all()
+    result_evidence = await db.execute(
+        select(DecisionEvidence).where(DecisionEvidence.strategy_id == id)
+    )
+    evidence_rows = result_evidence.scalars().all()
     
     strategy_data = {
         "objective_mode": strategy.objective_mode, "coverage_pct": strategy.coverage_pct,
@@ -160,6 +247,13 @@ async def api_get_strategy(id: str, db: AsyncSession = Depends(get_db)):
         "avg_risk": strategy.avg_risk, "predicted_shortage_impact": strategy.predicted_shortage_impact,
         "is_feasible": strategy.is_feasible, "infeasibility_reason": strategy.infeasibility_reason
     }
+    evidence = [{
+        "factor_type": row.factor_type,
+        "factor_name": row.factor_name,
+        "value": row.value,
+        "contribution": row.contribution,
+        "source_ref": row.source_ref,
+    } for row in evidence_rows]
     
     allocs_data = [{
         "resource_type": a.resource_type, "destination_name": f"Dest-{a.destination_id}",
@@ -168,14 +262,31 @@ async def api_get_strategy(id: str, db: AsyncSession = Depends(get_db)):
         "route_node_ids": a.route_node_ids
     } for a in allocs]
     
-    explanation = explanation_service.explain_strategy(strategy_data, allocs_data, [], strategy.state_version)
+    explanation = explanation_service.explain_strategy(
+        strategy_data, allocs_data, evidence, strategy.state_version
+    )
     
+    decision_result = await db.execute(
+        select(Decision).where(Decision.strategy_id == id)
+    )
+    decision = decision_result.scalar_one_or_none()
     return {
         "strategy": {
             "id": strategy.id, "mode": strategy.objective_mode, "score": strategy.score,
-            "status": strategy.status, "state_version": strategy.state_version
+            "coverage_pct": strategy.coverage_pct,
+            "unmet_demand": strategy.unmet_demand,
+            "avg_eta_min": strategy.avg_eta_min,
+            "avg_risk": strategy.avg_risk,
+            "status": strategy.status, "state_version": strategy.state_version,
+            "decision": {
+                "operator_id": decision.operator_id,
+                "operator_action": decision.operator_action,
+                "operator_note": decision.operator_note,
+                "timestamp": decision.timestamp.isoformat() if decision.timestamp else None,
+            } if decision else None,
         },
         "allocations": allocs,
+        "evidence": evidence,
         "explanation": explanation
     }
 
@@ -190,16 +301,31 @@ async def api_approve_strategy(id: str, req: ApprovalRequest, db: AsyncSession =
     if not scenario:
         raise HTTPException(404, "No active scenario")
         
-    if strategy.state_version != scenario.state_version:
+    if strategy.scenario_id != scenario.id or strategy.state_version != scenario.state_version:
         strategy.status = StrategyStatus.STALE
-        await audit_service.log_event(db, AuditEventType.STRATEGY_STALE, req.operator_id, "strategy", strategy.id, {"old_version": strategy.state_version, "current_version": scenario.state_version}, scenario.id)
+        await audit_service.log_event(
+            db, AuditEventType.STRATEGY_STALE, req.operator_id, "strategy",
+            strategy.id,
+            {
+                "strategy_scenario_id": strategy.scenario_id,
+                "active_scenario_id": scenario.id,
+                "old_version": strategy.state_version,
+                "current_version": scenario.state_version,
+            },
+            scenario.id,
+        )
         # Persist the STALE status + audit event before rejecting.
         # get_db() rolls back on exceptions, so raise-after-commit keeps traceability.
         await db.commit()
-        raise HTTPException(409, "Stale strategy - state has materially changed")
+        raise HTTPException(409, "Stale strategy - active scenario or state has changed")
         
     if strategy.status != StrategyStatus.GENERATED:
         raise HTTPException(400, f"Cannot approve strategy in status {strategy.status}")
+    if not strategy.is_feasible:
+        raise HTTPException(
+            409,
+            f"Cannot approve infeasible strategy: {strategy.infeasibility_reason or 'hard constraints are not satisfied'}",
+        )
         
     strategy.status = StrategyStatus.APPROVED
     
@@ -230,10 +356,46 @@ async def api_approve_strategy(id: str, req: ApprovalRequest, db: AsyncSession =
     result_allocs = await db.execute(select(Allocation).where(Allocation.strategy_id == id))
     allocs = result_allocs.scalars().all()
     
-    for a in allocs:
-        a.status = AllocationStatus.APPROVED
-        
-    await audit_service.log_event(db, AuditEventType.STRATEGY_APPROVED, req.operator_id, "strategy", strategy.id, {"allocations_count": len(allocs), "superseded_count": len(older_allocs)}, scenario.id)
+    strategy_approval_event = await audit_service.log_event(
+        db,
+        AuditEventType.STRATEGY_APPROVED,
+        req.operator_id,
+        "strategy",
+        strategy.id,
+        {
+            "allocations_count": len(allocs),
+            "superseded_count": len(older_allocs),
+            "operator_id": req.operator_id,
+            "state_version": strategy.state_version,
+        },
+        scenario.id,
+    )
+    for allocation in allocs:
+        allocation.status = AllocationStatus.APPROVED
+        passport_result = await db.execute(
+            select(ResourcePassport).where(
+                ResourcePassport.allocation_id == allocation.id
+            )
+        )
+        passport = passport_result.scalar_one_or_none()
+        await audit_service.log_event(
+            db,
+            AuditEventType.ALLOCATION_STATUS_CHANGED,
+            req.operator_id,
+            "allocation",
+            allocation.id,
+            {
+                "allocation_id": allocation.id,
+                "strategy_id": strategy.id,
+                "old_status": AllocationStatus.PROPOSED.value,
+                "new_status": AllocationStatus.APPROVED.value,
+                "operator_id": req.operator_id,
+                "strategy_approval_event_id": strategy_approval_event.id,
+                "incident_event_id": passport.incident_event_id if passport else None,
+                "state_version": strategy.state_version,
+            },
+            scenario.id,
+        )
     
     return {"status": "success", "message": "Strategy approved and allocations committed"}
 
@@ -243,6 +405,9 @@ async def api_reject_strategy(id: str, req: ApprovalRequest, db: AsyncSession = 
     strategy = result.scalar_one_or_none()
     if not strategy:
         raise HTTPException(404, "Strategy not found")
+
+    if strategy.status != StrategyStatus.GENERATED:
+        raise HTTPException(400, f"Cannot reject strategy in status {strategy.status}")
         
     scenario = await digital_twin_service.get_active_scenario(db)
     strategy.status = StrategyStatus.REJECTED
@@ -272,13 +437,25 @@ async def api_modify_strategy(id: str, req: StrategyModifyRequest, db: AsyncSess
     if not scenario:
         raise HTTPException(404, "No active scenario")
         
-    if strategy.state_version != scenario.state_version:
+    if strategy.scenario_id != scenario.id or strategy.state_version != scenario.state_version:
         strategy.status = StrategyStatus.STALE
+        await audit_service.log_event(
+            db, AuditEventType.STRATEGY_STALE, req.operator_id, "strategy",
+            strategy.id,
+            {
+                "strategy_scenario_id": strategy.scenario_id,
+                "active_scenario_id": scenario.id,
+                "old_version": strategy.state_version,
+                "current_version": scenario.state_version,
+                "action": "modify",
+            },
+            scenario.id,
+        )
         # Persist the STALE status before rejecting (same rollback consideration as approval).
         await db.commit()
-        raise HTTPException(409, "Cannot modify stale strategy — scenario state has changed")
+        raise HTTPException(409, "Cannot modify stale strategy — active scenario or state has changed")
         
-    if strategy.status not in (StrategyStatus.GENERATED, StrategyStatus.STALE):
+    if strategy.status != StrategyStatus.GENERATED:
         raise HTTPException(400, f"Cannot modify strategy in status {strategy.status}")
 
     # Record decision with operator note
@@ -290,19 +467,26 @@ async def api_modify_strategy(id: str, req: StrategyModifyRequest, db: AsyncSess
     db.add(decision)
     
     # If allocation modifications provided, apply them to proposed allocations
-    if req.allocation_modifications:
-        for mod in req.allocation_modifications:
-            alloc_id = mod.get("allocation_id")
-            if alloc_id:
-                alloc_res = await db.execute(select(Allocation).where(Allocation.id == alloc_id, Allocation.strategy_id == id))
-                alloc = alloc_res.scalar_one_or_none()
-                if alloc:
-                    if "quantity" in mod:
-                        alloc.quantity = mod["quantity"]
-                    if "destination_id" in mod:
-                        alloc.destination_id = mod["destination_id"]
-                    if "vehicle_id" in mod:
-                        alloc.vehicle_id = mod["vehicle_id"]
+    allocations_to_modify = []
+    for modification in req.allocation_modifications or []:
+        alloc_res = await db.execute(
+            select(Allocation).where(
+                Allocation.id == modification.allocation_id,
+                Allocation.strategy_id == id,
+            )
+        )
+        alloc = alloc_res.scalar_one_or_none()
+        if not alloc or alloc.status != AllocationStatus.PROPOSED:
+            raise HTTPException(400, "Only proposed allocations in this strategy can be modified")
+        if modification.quantity > alloc.quantity:
+            raise HTTPException(
+                400,
+                "Modified quantities cannot exceed the optimizer-proposed quantity",
+            )
+        allocations_to_modify.append((alloc, modification.quantity))
+
+    for alloc, quantity in allocations_to_modify:
+        alloc.quantity = quantity
         await db.flush()
 
     await audit_service.log_event(
@@ -374,12 +558,18 @@ async def api_chaos_event(req: ChaosEventRequest, db: AsyncSession = Depends(get
         else:
             raise HTTPException(400, f"Unknown chaos event type: {req.event_type}")
 
-        await audit_service.log_event(
+        chaos_audit_event = await audit_service.log_event(
             db, AuditEventType.CHAOS_EVENT_APPLIED, "simulation", "scenario", scenario.id,
             {"event_type": req.event_type, "payload": req.payload, "impacted_count": len(impacted)},
             scenario.id
         )
-        return {"status": "success", "result": res, "impacted_allocations": impacted}
+        return {
+            "status": "success",
+            "result": res,
+            "event_id": chaos_audit_event.id,
+            "impacted_count": len(impacted),
+            "impacted_allocations": impacted,
+        }
     except ValueError as ve:
         raise HTTPException(400, str(ve))
     except Exception as e:
@@ -389,7 +579,14 @@ async def api_chaos_event(req: ChaosEventRequest, db: AsyncSession = Depends(get
 
 @router.get("/allocations")
 async def api_get_allocations(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Allocation).order_by(Allocation.created_at.desc()))
+    scenario = await digital_twin_service.get_active_scenario(db)
+    if not scenario:
+        return {"allocations": []}
+    result = await db.execute(
+        select(Allocation)
+        .where(Allocation.scenario_id == scenario.id)
+        .order_by(Allocation.created_at.desc())
+    )
     allocs = result.scalars().all()
     
     # Enrich with human-readable names
@@ -443,22 +640,173 @@ async def api_get_allocations(db: AsyncSession = Depends(get_db)):
         
     return {"allocations": enriched}
 
+@router.get("/allocations/{id}/passport")
+async def api_get_resource_passport(id: str, db: AsyncSession = Depends(get_db)):
+    allocation_result = await db.execute(
+        select(Allocation).where(Allocation.id == id)
+    )
+    allocation = allocation_result.scalar_one_or_none()
+    if not allocation:
+        raise HTTPException(404, "Allocation not found")
+    passport_result = await db.execute(
+        select(ResourcePassport).where(
+            ResourcePassport.allocation_id == allocation.id
+        )
+    )
+    passport = passport_result.scalar_one_or_none()
+    if not passport:
+        raise HTTPException(404, "Resource Passport not found for allocation")
+
+    source_name = None
+    if allocation.source_id:
+        source_result = await db.execute(
+            select(ResourceSource).where(ResourceSource.id == allocation.source_id)
+        )
+        source = source_result.scalar_one_or_none()
+        source_name = source.name if source else allocation.source_id
+    destination_result = await db.execute(
+        select(Zone).where(Zone.id == allocation.destination_id)
+    )
+    destination = destination_result.scalar_one_or_none()
+    if not destination:
+        hospital_result = await db.execute(
+            select(Hospital).where(Hospital.id == allocation.destination_id)
+        )
+        destination = hospital_result.scalar_one_or_none()
+    vehicle_result = await db.execute(
+        select(Ambulance).where(Ambulance.id == allocation.vehicle_id)
+    ) if allocation.vehicle_id else None
+    vehicle = vehicle_result.scalar_one_or_none() if vehicle_result else None
+    medicine_result = await db.execute(
+        select(MedicineType).where(MedicineType.id == allocation.medicine_type_id)
+    ) if allocation.medicine_type_id else None
+    medicine = medicine_result.scalar_one_or_none() if medicine_result else None
+
+    linked_event_conditions = [
+        and_(
+            AuditEvent.entity_type == "allocation",
+            AuditEvent.entity_id == allocation.id,
+        ),
+        and_(
+            AuditEvent.entity_type == "strategy",
+            AuditEvent.entity_id == allocation.strategy_id,
+            AuditEvent.event_type.in_((
+                AuditEventType.STRATEGY_GENERATED,
+                AuditEventType.STRATEGY_APPROVED,
+                AuditEventType.STRATEGY_REJECTED,
+                AuditEventType.STRATEGY_STALE,
+            )),
+        ),
+    ]
+    if passport.incident_event_id:
+        linked_event_conditions.append(AuditEvent.id == passport.incident_event_id)
+    linked_events_result = await db.execute(
+        select(AuditEvent)
+        .where(
+            AuditEvent.scenario_id == allocation.scenario_id,
+            or_(*linked_event_conditions),
+        )
+        .order_by(AuditEvent.timestamp.asc(), AuditEvent.id.asc())
+    )
+    linked_events = linked_events_result.scalars().all()
+    approval = next(
+        (
+            event for event in linked_events
+            if event.event_type == AuditEventType.STRATEGY_APPROVED
+        ),
+        None,
+    )
+    transitions = [
+        {
+            "from_status": event.payload_json.get("old_status"),
+            "to_status": event.payload_json.get("new_status"),
+            "operator_id": event.actor,
+            "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+            "audit_event_id": event.id,
+        }
+        for event in linked_events
+        if event.event_type == AuditEventType.ALLOCATION_STATUS_CHANGED
+    ]
+    verification = await audit_service.verify_chain(
+        db, scenario_id=allocation.scenario_id
+    )
+    return {
+        "passport_id": allocation.id,
+        "allocation_id": allocation.id,
+        "scenario_id": allocation.scenario_id,
+        "state_version": passport.state_version,
+        "resource_reference_id": passport.resource_reference_id,
+        "resource_type": allocation.resource_type,
+        "source_id": allocation.source_id,
+        "source_name": source_name,
+        "destination_id": allocation.destination_id,
+        "destination_name": destination.name if destination else allocation.destination_id,
+        "destination_type": allocation.destination_type,
+        "quantity": allocation.quantity,
+        "vehicle_id": allocation.vehicle_id,
+        "vehicle_name": vehicle.name if vehicle else None,
+        "medicine_type_id": allocation.medicine_type_id,
+        "medicine_type_code": medicine.code if medicine else None,
+        "route_snapshot": passport.route_snapshot,
+        "route_node_ids": passport.route_snapshot.get("node_ids", []),
+        "route_distance_km": passport.route_snapshot.get("distance_km"),
+        "route_travel_min": passport.route_snapshot.get("estimated_travel_min"),
+        "status": allocation.status,
+        "created_at": allocation.created_at.isoformat() if allocation.created_at else None,
+        "updated_at": allocation.updated_at.isoformat() if allocation.updated_at else None,
+        "strategy_id": allocation.strategy_id,
+        "incident_event_id": passport.incident_event_id,
+        "approving_operator": approval.actor if approval else None,
+        "lifecycle": transitions,
+        "audit_references": [
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+                "previous_hash": event.previous_hash,
+                "event_hash": event.event_hash,
+            }
+            for event in linked_events
+        ],
+        "audit_chain": {
+            "valid": verification["valid"],
+            "event_count": verification["event_count"],
+        },
+    }
+
 @router.patch("/allocations/{id}/status")
 async def api_update_allocation_status(id: str, req: AllocationStatusUpdate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Allocation).where(Allocation.id == id))
     alloc = result.scalar_one_or_none()
     if not alloc:
         raise HTTPException(404, "Allocation not found")
+    scenario = await digital_twin_service.get_active_scenario(db)
+    if not scenario or scenario.id != alloc.scenario_id:
+        raise HTTPException(409, "Allocation does not belong to the active scenario")
+    passport_result = await db.execute(
+        select(ResourcePassport).where(
+            ResourcePassport.allocation_id == alloc.id
+        )
+    )
+    passport = passport_result.scalar_one_or_none()
+    if not passport:
+        raise HTTPException(409, "Allocation has no Resource Passport")
         
     old_status = alloc.status
     try:
         new_status_enum = AllocationStatus(req.status.lower())
     except ValueError:
         raise HTTPException(400, f"Invalid allocation status: {req.status}")
+
+    if new_status_enum == AllocationStatus.APPROVED:
+        raise HTTPException(
+            409,
+            "Approve the parent strategy through the operator approval endpoint before activating its allocations",
+        )
         
     # Validate transition
     valid_transitions = {
-        AllocationStatus.PROPOSED: [AllocationStatus.APPROVED, AllocationStatus.CANCELLED],
+        AllocationStatus.PROPOSED: [AllocationStatus.CANCELLED],
         AllocationStatus.APPROVED: [AllocationStatus.DISPATCHED, AllocationStatus.IN_TRANSIT, AllocationStatus.CANCELLED, AllocationStatus.SUPERSEDED],
         AllocationStatus.DISPATCHED: [AllocationStatus.IN_TRANSIT, AllocationStatus.CANCELLED, AllocationStatus.SUPERSEDED],
         AllocationStatus.IN_TRANSIT: [AllocationStatus.DELIVERED, AllocationStatus.CANCELLED, AllocationStatus.SUPERSEDED],
@@ -472,23 +820,42 @@ async def api_update_allocation_status(id: str, req: AllocationStatusUpdate, db:
         raise HTTPException(400, f"Invalid lifecycle transition from {old_status} to {new_status_enum}")
         
     alloc.status = new_status_enum
-    await audit_service.log_event(
-        db, AuditEventType.ALLOCATION_STATUS_CHANGED, "operator", "allocation", alloc.id,
-        {"old_status": old_status, "new_status": req.status}, alloc.scenario_id
+    event = await audit_service.log_event(
+        db, AuditEventType.ALLOCATION_STATUS_CHANGED, req.operator_id, "allocation", alloc.id,
+        {
+            "allocation_id": alloc.id,
+            "strategy_id": alloc.strategy_id,
+            "old_status": old_status.value,
+            "new_status": new_status_enum.value,
+            "operator_id": req.operator_id,
+            "incident_event_id": passport.incident_event_id,
+            "state_version": scenario.state_version,
+        },
+        alloc.scenario_id,
     )
-    return {"status": "success", "allocation_id": alloc.id, "new_status": alloc.status}
+    return {
+        "status": "success",
+        "allocation_id": alloc.id,
+        "new_status": alloc.status,
+        "audit_event_id": event.id,
+    }
 
 @router.get("/audit")
 async def api_get_audit(db: AsyncSession = Depends(get_db)):
-    events = await audit_service.get_events(db)
+    scenario = await digital_twin_service.get_active_scenario(db)
+    if not scenario:
+        return {"events": []}
+    events = await audit_service.get_events(db, scenario_id=scenario.id)
     return {"events": events}
 
 @router.get("/audit/verify")
 async def api_verify_audit(db: AsyncSession = Depends(get_db)):
-    verification = await audit_service.verify_chain(db)
+    scenario = await digital_twin_service.get_active_scenario(db)
+    if not scenario:
+        return {"valid": True, "event_count": 0, "errors": []}
+    verification = await audit_service.verify_chain(db, scenario_id=scenario.id)
     return verification
 
 @router.get("/health")
 async def api_health():
     return {"status": "ok", "version": "1.0"}
-

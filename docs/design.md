@@ -21,6 +21,7 @@ The operator should be able to answer:
 # 2. Global UI rules
 
 - Persistent **SIMULATION MODE** banner.
+- Accessible **Load / reset scenario** control for Urban Flood (primary) and Earthquake (alternate).
 - Never label a recommendation as an “AI order”.
 - Use **Recommendation**.
 - Use **Estimate** for forecasts.
@@ -51,7 +52,7 @@ Audit
 
 ## Header
 - ReliefOS logo/name.
-- Active scenario.
+- Active scenario selector; switching loads that scenario's deterministic baseline and requires confirmation because its history is reset.
 - Simulation mode.
 - Current state version.
 - Current allocation version.
@@ -230,12 +231,18 @@ State version changes
     ↓
 Impact detection
     ↓
-Replan
+Operator generates a replacement recommendation
     ↓
 Review recommendation
     ↓
 Approve
 ```
+
+An event never automatically applies a replacement allocation; an operator must review and approve it.
+
+After generating a replacement candidate, the Simulation page exposes an
+explicit **Approve and apply replan** action. The candidate remains proposed
+until that action succeeds; stale approval errors are surfaced to the operator.
 
 ---
 
@@ -260,6 +267,12 @@ Each allocation links to:
 - resource,
 - decision,
 - audit events.
+
+The Passport view exposes the persisted provenance and route snapshot, lifecycle
+timestamps, recorded operator, strategy/scenario/incident references, linked
+audit hashes and chain-verification result. Lifecycle changes are operator-
+triggered simulation records, not GPS-confirmed movement or physical delivery
+attestations.
 
 ---
 

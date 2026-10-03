@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from typing import List, Dict, Optional, Any, Literal
 
 VALID_STRATEGY_MODES = {"balanced", "severity_first", "coverage_first", "baseline_nearest"}
@@ -30,13 +30,17 @@ class ApprovalRequest(BaseModel):
     operator_note: Optional[str] = None
     operator_id: str = "Emergency Command Operator"
 
+class AllocationModification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allocation_id: str
+    quantity: StrictInt = Field(gt=0)
+
 class StrategyModifyRequest(BaseModel):
     operator_id: str = "Emergency Command Operator"
     operator_note: Optional[str] = None
-    allocation_modifications: Optional[List[Dict[str, Any]]] = None
+    allocation_modifications: Optional[List[AllocationModification]] = None
 
 class AllocationStatusUpdate(BaseModel):
     status: str
-
-
-
+    operator_id: str = "Emergency Command Operator"

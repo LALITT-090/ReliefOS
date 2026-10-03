@@ -6,11 +6,13 @@ BR-016: Primary demo scenario is reproducible.
 
 This is a SIMULATED scenario with synthetic data.
 """
+import copy
 import uuid
 from datetime import datetime, timezone
 
 # Fixed UUIDs for determinism (seed = 42)
 SCENARIO_ID = "00000000-0000-0000-0000-000000000001"
+EARTHQUAKE_SCENARIO_ID = "00000000-0000-0000-0000-000000000002"
 
 # Road node IDs
 NODE_IDS = {
@@ -420,6 +422,85 @@ def get_seed_data() -> dict:
              "medicine_type_id": MED_IDS["IV_FLUID"], "quantity": 10, "severity": "medium", "urgency": "routine"},
         ],
     }
+
+
+def get_earthquake_seed_data() -> dict:
+    """Return a complete, deterministic synthetic earthquake configuration."""
+    seed = copy.deepcopy(get_seed_data())
+    id_map = {
+        SCENARIO_ID: EARTHQUAKE_SCENARIO_ID,
+    }
+    scenario_entity_groups = (
+        "road_nodes",
+        "zones",
+        "hospitals",
+        "resource_sources",
+        "ambulances",
+        "road_edges",
+        "medicine_inventory",
+        "demands",
+    )
+    for group in scenario_entity_groups:
+        for entity in seed[group]:
+            entity_id = entity["id"]
+            id_map[entity_id] = str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"reliefos:earthquake-v1:{entity_id}")
+            )
+
+    def remap_ids(value):
+        if isinstance(value, dict):
+            return {key: remap_ids(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [remap_ids(item) for item in value]
+        if isinstance(value, str):
+            return id_map.get(value, value)
+        return value
+
+    seed = remap_ids(seed)
+    seed["scenario"].update(
+        id=EARTHQUAKE_SCENARIO_ID,
+        name="Earthquake — District Response",
+        disaster_type="earthquake",
+        description=(
+            "Simulated earthquake response across 5 district zones. "
+            "Synthetic demo data only."
+        ),
+        seed=99,
+    )
+
+    for index, zone in enumerate(seed["zones"], start=1):
+        zone["name"] = f"Earthquake Zone {index} — District"
+        zone["affected_population"] = round(zone["affected_population"] * 1.2)
+
+    for index, hospital in enumerate(seed["hospitals"], start=1):
+        hospital["name"] = f"District Hospital {index}"
+        hospital["icu_available"] = max(0, round(hospital["icu_available"] * 0.8))
+
+    for index, source in enumerate(seed["resource_sources"], start=1):
+        source["name"] = f"Earthquake Response Depot {index}"
+
+    for index, ambulance in enumerate(seed["ambulances"], start=1):
+        ambulance["name"] = f"EQ-{index:02d}"
+
+    for demand in seed["demands"]:
+        demand["quantity"] = max(1, round(demand["quantity"] * 1.2))
+
+    for inventory in seed["medicine_inventory"]:
+        inventory["quantity_available"] = max(
+            inventory["reserve_quantity"],
+            round(inventory["quantity_available"] * 0.85),
+        )
+
+    return seed
+
+
+def get_scenario_seed_data(scenario_id: str) -> dict:
+    """Return the deterministic seed for a configured scenario."""
+    if scenario_id == SCENARIO_ID:
+        return get_seed_data()
+    if scenario_id == EARTHQUAKE_SCENARIO_ID:
+        return get_earthquake_seed_data()
+    raise ValueError(f"Unknown scenario id: {scenario_id}")
 
 
 # Scripted chaos events for the primary demo (deterministic)

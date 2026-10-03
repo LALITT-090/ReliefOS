@@ -212,6 +212,20 @@ select:focus-visible {
   margin-top: 3px;
 }
 
+.topbar-scenario-select {
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  color: #111827;
+  display: block;
+  font-size: 12px;
+  font-weight: 650;
+  margin-top: 3px;
+  max-width: min(280px, 58vw);
+  min-height: 30px;
+  padding: 3px 26px 3px 7px;
+}
+
 .simulation-indicator {
   align-items: center;
   background: #fff7ed;

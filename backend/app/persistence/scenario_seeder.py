@@ -11,10 +11,15 @@ from sqlalchemy import select, delete
 
 from app.domain.models.database import (
     Scenario, Zone, Hospital, ResourceSource, MedicineType, MedicineInventory,
-    Ambulance, RoadNode, RoadEdge, Demand, Strategy, Allocation, AuditEvent,
+    Ambulance, RoadNode, RoadEdge, Demand, Strategy, Allocation, ResourcePassport, AuditEvent,
+    Decision, DecisionEvidence, Incident,
     ScenarioStatus, AuditEventType,
 )
-from app.persistence.seed_data import get_seed_data, SCENARIO_ID
+from app.persistence.seed_data import (
+    EARTHQUAKE_SCENARIO_ID,
+    SCENARIO_ID,
+    get_scenario_seed_data,
+)
 from app.audit.audit_service import audit_service
 
 
@@ -23,7 +28,7 @@ async def load_scenario(db: AsyncSession, scenario_id: str = SCENARIO_ID) -> Sce
     Load or reset a deterministic scenario.
     API-001: POST /api/v1/scenarios/{id}/load
     """
-    seed = get_seed_data()
+    seed = get_scenario_seed_data(scenario_id)
 
     # ── 1. Delete existing scenario data (for reset) ──────────────────────
     existing = await db.execute(
@@ -34,8 +39,22 @@ async def load_scenario(db: AsyncSession, scenario_id: str = SCENARIO_ID) -> Sce
     if existing_scenario:
         # Full reset: delete all dependent data
         await db.execute(delete(AuditEvent).where(AuditEvent.scenario_id == scenario_id))
+        # Passports are provenance records keyed to allocations, so they must be
+        # removed before their allocation records during a deterministic reset.
+        await db.execute(delete(ResourcePassport).where(ResourcePassport.scenario_id == scenario_id))
         await db.execute(delete(Allocation).where(Allocation.scenario_id == scenario_id))
+        await db.execute(delete(Decision).where(
+            Decision.strategy_id.in_(
+                select(Strategy.id).where(Strategy.scenario_id == scenario_id)
+            )
+        ))
+        await db.execute(delete(DecisionEvidence).where(
+            DecisionEvidence.strategy_id.in_(
+                select(Strategy.id).where(Strategy.scenario_id == scenario_id)
+            )
+        ))
         await db.execute(delete(Strategy).where(Strategy.scenario_id == scenario_id))
+        await db.execute(delete(Incident).where(Incident.scenario_id == scenario_id))
         await db.execute(delete(Demand).where(Demand.scenario_id == scenario_id))
         await db.execute(delete(MedicineInventory).where(
             MedicineInventory.source_id.in_(
@@ -52,9 +71,6 @@ async def load_scenario(db: AsyncSession, scenario_id: str = SCENARIO_ID) -> Sce
         await db.flush()
 
     # ── 2. Deactivate other scenarios ─────────────────────────────────────
-    await db.execute(
-        select(Scenario).where(Scenario.status == ScenarioStatus.ACTIVE)
-    )
     # Update other active scenarios
     other_result = await db.execute(
         select(Scenario).where(
@@ -186,38 +202,6 @@ async def load_scenario(db: AsyncSession, scenario_id: str = SCENARIO_ID) -> Sce
 
 async def get_or_load_earthquake_scenario(db: AsyncSession) -> Scenario:
     """
-    Alternate scenario: Earthquake.
-    TASK-016: At least one alternate disaster configuration.
+    Load/reset the complete alternate earthquake scenario.
     """
-    EQ_SCENARIO_ID = "00000000-0000-0000-0000-000000000002"
-    existing = await db.execute(
-        select(Scenario).where(Scenario.id == EQ_SCENARIO_ID)
-    )
-    if existing.scalar_one_or_none():
-        return existing.scalar_one_or_none()
-
-    # Create minimal earthquake scenario
-    # Share medicine types with urban flood
-    scenario = Scenario(
-        id=EQ_SCENARIO_ID,
-        name="Earthquake — District Response",
-        disaster_type="earthquake",
-        description="Simulated earthquake response scenario. Synthetic demo data.",
-        status=ScenarioStatus.INACTIVE,
-        seed=99,
-        state_version=1,
-    )
-    db.add(scenario)
-    await db.flush()
-
-    await audit_service.log_event(
-        db=db,
-        event_type=AuditEventType.SCENARIO_LOADED,
-        actor="system",
-        entity_type="scenario",
-        entity_id=EQ_SCENARIO_ID,
-        payload={"scenario_name": scenario.name, "disaster_type": scenario.disaster_type},
-        scenario_id=EQ_SCENARIO_ID,
-    )
-
-    return scenario
+    return await load_scenario(db, EARTHQUAKE_SCENARIO_ID)

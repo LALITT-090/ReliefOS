@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import axios from "axios";
 import { API_BASE_URL } from "@/lib/api";
 import { AlertOctagon, Activity, Truck, Package, MapPin, Zap, RefreshCcw, CheckCircle, XCircle, ArrowRight } from "lucide-react";
@@ -10,6 +10,10 @@ import { useReliefData } from "@/components/ReliefDataContext";
 export default function SimulationSandbox() {
   const { twin, allocations, refreshSnapshot } = useReliefData();
   const [result, setResult] = useState<any>(null);
+  const [replan, setReplan] = useState<any>(null);
+  const [replanError, setReplanError] = useState<string | null>(null);
+  const [loadingReplan, setLoadingReplan] = useState(false);
+  const [approvingReplan, setApprovingReplan] = useState(false);
   const [eventError, setEventError] = useState<string | null>(null);
   const [loadingEvent, setLoadingEvent] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState("road_block");
@@ -18,6 +22,8 @@ export default function SimulationSandbox() {
     setLoadingEvent(type);
     setEventError(null);
     setResult(null);
+    setReplan(null);
+    setReplanError(null);
     const stateVersionBefore = twin?.state_version ?? null;
     try {
       const res = await axios.post(`${API_BASE_URL}/v1/chaos/events`, {
@@ -36,6 +42,15 @@ export default function SimulationSandbox() {
         stateVersionBefore,
         stateVersionAfter: snapshot?.twin?.state_version ?? res.data.result?.new_state_version ?? null,
         response: res.data,
+        baselineAllocations: allocations
+          .filter((allocation: any) => ["approved", "dispatched", "in_transit"].includes(allocation.status))
+          .map((allocation: any) => ({
+            id: allocation.id,
+            resource_type: allocation.resource_type,
+            quantity: allocation.quantity,
+            destination_name: allocation.destination_name,
+            status: allocation.status,
+          })),
         predictions: predictionsResult.status === "fulfilled" ? predictionsResult.value.data.forecasts || [] : null,
         auditEvents: auditResult.status === "fulfilled" ? auditResult.value.data.events || [] : null,
         auditConfirmed: auditResult.status === "fulfilled" && auditResult.value.data.events?.some((event: any) =>
@@ -51,6 +66,81 @@ export default function SimulationSandbox() {
     }
   };
 
+  const generateReplan = async () => {
+    setLoadingReplan(true);
+    setReplanError(null);
+    try {
+      const response = await axios.post(`${API_BASE_URL}/v1/strategies/generate`, {
+        mode: "balanced",
+      });
+      const [detail, snapshot] = await Promise.all([
+        axios.get(`${API_BASE_URL}/v1/strategies/${response.data.strategy_id}`),
+        refreshSnapshot(true),
+      ]);
+      setReplan({
+        ...detail.data,
+        optimizationResult: response.data.result,
+        refreshedVersion: snapshot.twin?.state_version,
+      });
+    } catch (err: any) {
+      setReplanError(err.response?.data?.detail || "Replan generation or refresh failed. Check the Strategy Lab before continuing.");
+    } finally {
+      setLoadingReplan(false);
+    }
+  };
+
+  const approveReplan = async () => {
+    if (!replan?.strategy?.id || replan.strategy.status !== "generated") return;
+    setApprovingReplan(true);
+    setReplanError(null);
+    try {
+      await axios.post(`${API_BASE_URL}/v1/strategies/${replan.strategy.id}/approve`, {
+        operator_action: "approved",
+        operator_id: "Emergency Incident Commander",
+      });
+      const [detail, snapshot] = await Promise.all([
+        axios.get(`${API_BASE_URL}/v1/strategies/${replan.strategy.id}`),
+        refreshSnapshot(true),
+      ]);
+      setReplan({
+        ...detail.data,
+        optimizationResult: replan.optimizationResult,
+        refreshedVersion: snapshot.twin?.state_version,
+      });
+    } catch (err: any) {
+      setReplanError(err.response?.data?.detail || "The replan was not approved. Refresh the Digital Twin and review the current state.");
+    } finally {
+      setApprovingReplan(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!replan?.strategy?.id || replan.strategy.status !== "generated") return;
+    let active = true;
+    const refreshReplan = async () => {
+      try {
+        const [detail, snapshot] = await Promise.all([
+          axios.get(`${API_BASE_URL}/v1/strategies/${replan.strategy.id}`),
+          refreshSnapshot(true),
+        ]);
+        if (active) {
+          setReplan((current: any) => ({
+            ...detail.data,
+            optimizationResult: current?.optimizationResult,
+            refreshedVersion: snapshot.twin?.state_version,
+          }));
+        }
+      } catch {
+        if (active) setReplanError("Could not refresh the replan approval state. Reopen Strategy Lab or retry.");
+      }
+    };
+    const interval = setInterval(refreshReplan, 3000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [replan?.strategy?.id, replan?.strategy?.status, refreshSnapshot]);
+
   const resetScenario = async () => {
     const confirmed = window.confirm(
       "Reset this scenario to its initial simulation baseline? This removes its strategies, allocations, and audit events."
@@ -60,8 +150,13 @@ export default function SimulationSandbox() {
     setLoadingEvent("reset");
     setEventError(null);
     setResult(null);
+    setReplan(null);
+    setReplanError(null);
     try {
-      const res = await axios.post(`${API_BASE_URL}/v1/scenarios/00000000-0000-0000-0000-000000000001/load`);
+      if (!twin?.scenario?.id) {
+        throw new Error("No active scenario is available to reset.");
+      }
+      const res = await axios.post(`${API_BASE_URL}/v1/scenarios/${twin.scenario.id}/load`);
       const [snapshotResult, predictionsResult, auditResult] = await Promise.allSettled([
         refreshSnapshot(true),
         axios.get(`${API_BASE_URL}/v1/predictions`),
@@ -80,57 +175,68 @@ export default function SimulationSandbox() {
         predictionsError: predictionsResult.status === "rejected" || auditResult.status === "rejected",
       });
     } catch (err: any) {
-      setEventError(`Scenario reset was not completed. ${err.response?.data?.detail || "The previous simulation state remains in place."}`);
+      setEventError(`Scenario reset was not completed. ${err.response?.data?.detail || err.message || "The previous simulation state remains in place."}`);
     } finally {
       setLoadingEvent(null);
     }
   };
 
+  const firstEdge = twin?.road_edges?.[0];
+  const firstHospital = twin?.hospitals?.[0];
+  const firstAmbulance = twin?.ambulances?.find((ambulance: any) => ambulance.availability_status === "available") || twin?.ambulances?.[0];
+  const firstZone = twin?.zones?.[0];
+  const firstInventory = twin?.medicine_inventory?.[0];
   const events = [
     {
       id: "road_block",
       title: "1. Road Block",
       icon: <AlertOctagon className="text-rose-400" />,
-      desc: "Simulate a flooded/collapsed arterial road edge (Central-North).",
-      payload: { edge_id: "77000000-0000-0000-0000-000000000001" }
+      desc: "Simulate a road closure on an edge in the active scenario network.",
+      payload: { edge_id: firstEdge?.id || "77000000-0000-0000-0000-000000000001" }
     },
     {
       id: "hospital_overload",
       title: "2. Hospital Overload",
       icon: <Activity className="text-amber-400" />,
-      desc: "Simulate sudden ICU capacity reduction at City General Hospital.",
-      payload: { hospital_id: "33000000-0000-0000-0000-000000000001", icu_reduction: 10 }
+      desc: "Simulate a sudden ICU capacity reduction at an active scenario hospital.",
+      payload: {
+        hospital_id: firstHospital?.id || "33000000-0000-0000-0000-000000000001",
+        icu_reduction: Math.min(10, Math.max(1, firstHospital?.icu_available || 10)),
+      }
     },
     {
       id: "vehicle_failure",
       title: "3. Vehicle Failure",
       icon: <Truck className="text-teal-400" />,
-      desc: "Mark an active ambulance (A-01) as broken down / failed.",
-      payload: { ambulance_id: "66000000-0000-0000-0000-000000000001" }
+      desc: "Mark an available ambulance in the active scenario as failed.",
+      payload: { ambulance_id: firstAmbulance?.id || "66000000-0000-0000-0000-000000000001" }
     },
     {
       id: "demand_spike",
       title: "4. Demand Spike",
       icon: <Zap className="text-yellow-400" />,
-      desc: "Sudden casualty surge in Zone A (Riverside District).",
-      payload: { zone_id: "22000000-0000-0000-0000-000000000001", resource_type: "ambulance", increase_amount: 3 }
+      desc: "Add ambulance demand to a zone in the active scenario.",
+      payload: { zone_id: firstZone?.id || "22000000-0000-0000-0000-000000000001", resource_type: "ambulance", increase_amount: 3 }
     },
     {
       id: "medicine_shortage",
       title: "5. Medicine Shortage",
       icon: <Package className="text-teal-400" />,
-      desc: "Simulate warehouse contamination/depletion of antibiotics stock.",
-      payload: { inventory_id: "88000000-0000-0000-0000-000000000001", reduction: 50 }
+      desc: "Reduce typed medicine stock at a supply source in the active scenario.",
+      payload: {
+        inventory_id: firstInventory?.id || "88000000-0000-0000-0000-000000000001",
+        reduction: Math.min(50, Math.max(1, (firstInventory?.quantity_available || 51) - (firstInventory?.reserve_quantity || 0))),
+      }
     },
     {
       id: "new_incident_zone",
       title: "6. New Incident Zone",
       icon: <MapPin className="text-blue-400" />,
-      desc: "Spawn a newly flooded sector (Zone F — Port Area) with urgent demands.",
+      desc: "Add a synthetic incident zone with urgent demand to the active scenario.",
       payload: {
-        name: "Zone F — Port Area",
-        lat: 18.4800,
-        lon: 73.8700,
+        name: "New Incident Zone",
+        lat: (firstZone?.lat || 18.48) + 0.01,
+        lon: (firstZone?.lon || 73.87) + 0.01,
         severity: "high",
         affected_population: 800,
         demands: [{ resource_type: "ambulance", quantity: 2, severity: "high", urgency: "urgent" }]
@@ -258,13 +364,16 @@ export default function SimulationSandbox() {
           {result.kind !== "reset" && <div className="grid gap-4 lg:grid-cols-2">
             <div className="rounded-lg bg-slate-50 p-4">
               <h2 className="text-xs font-bold uppercase tracking-wide text-slate-700">Measured Event Impact</h2>
+              <p className="mt-2 text-xs text-slate-700">
+                Baseline before event: {result.baselineAllocations?.length || 0} approved/dispatched/in-transit allocation(s).
+              </p>
               <p className="mt-2 text-sm font-semibold text-slate-900">
                 {impactSummary}
               </p>
               <div className="mt-3 text-xs font-semibold text-slate-700">
                 {result.response.impacted_allocations?.length > 0
                   ? `${result.response.impacted_allocations.length} active allocation(s) flagged for review.`
-                  : "No active allocations were identified as affected by this event."}
+                  : "0 allocations affected among the currently active approved movements."}
               </div>
               {result.response.impacted_allocations?.length > 0 ? (
                 <ul className="mt-2 space-y-2">
@@ -280,11 +389,22 @@ export default function SimulationSandbox() {
                   })}
                 </ul>
               ) : null}
+              {result.response.event_id && (
+                <p className="mt-3 break-all text-[10px] text-slate-500">Audit event reference: {result.response.event_id}</p>
+              )}
             </div>
 
             <div className="rounded-lg bg-slate-50 p-4">
-              <h2 className="text-xs font-bold uppercase tracking-wide text-slate-700">Next Operator Decision</h2>
-              <p className="mt-2 text-xs leading-relaxed text-slate-700">Review refreshed forecasts and affected routes, then generate a candidate strategy. ReliefOS does not automatically reallocate resources.</p>
+              <h2 className="text-xs font-bold uppercase tracking-wide text-slate-700">Event Applied — Next Operator Decision</h2>
+              <p className="mt-2 text-xs leading-relaxed text-slate-700">Review the refreshed forecasts and generate a new candidate. It remains a proposal until an operator approves it; ReliefOS does not automatically reallocate resources.</p>
+              <button
+                type="button"
+                onClick={generateReplan}
+                disabled={loadingReplan || Boolean(replan)}
+                className="mt-3 inline-flex min-h-9 items-center gap-2 rounded-md bg-teal-700 px-3 py-2 text-xs font-bold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {loadingReplan ? "Generating replan…" : replan ? "Replan generated" : "Generate replan"}
+              </button>
               <Link href="/strategy-lab" className="mt-3 inline-flex items-center gap-2 rounded-md bg-teal-700 px-3 py-2 text-xs font-bold text-white hover:bg-teal-800">
                 Review strategies <ArrowRight size={14} />
               </Link>
@@ -293,8 +413,45 @@ export default function SimulationSandbox() {
                 {result.auditConfirmed && <p>Event recorded in the <Link href="/audit" className="font-bold text-teal-800 underline">Audit Trail</Link>.</p>}
               </div>
               {result.predictionsError && <p className="mt-3 text-xs text-amber-900">Event applied. Some supporting forecast or audit details could not refresh; use those pages&apos; refresh controls to retry.</p>}
+              {replanError && <p role="alert" className="mt-3 text-xs text-rose-800">{replanError}</p>}
             </div>
           </div>}
+
+          {replan && (
+            <section className="rounded-lg border border-amber-200 bg-amber-50 p-4" aria-label="Generated replan">
+              <h2 className="text-xs font-bold uppercase tracking-wide text-amber-950">
+                {replan.strategy.status === "approved" ? "Replan Approved" : "Replan Generated — Not Yet Applied"}
+              </h2>
+              <p className="mt-2 text-xs text-amber-950">
+                Candidate {replan.strategy.id} · state v{replan.strategy.state_version} · coverage {replan.strategy.coverage_pct}% · score {replan.strategy.score}
+              </p>
+              <p className="mt-1 text-xs font-semibold text-amber-950">
+                {replan.strategy.status === "approved"
+                  ? "Operator approval recorded. The proposed allocations are now committed to the simulated Digital Twin."
+                  : replan.strategy.status === "stale"
+                  ? "This candidate is stale and cannot be committed; generate a fresh replan."
+                  : "Approval required. No proposed resource movement has been committed."}
+              </p>
+              {replan.strategy.status === "generated" && (
+                <button
+                  type="button"
+                  onClick={approveReplan}
+                  disabled={approvingReplan}
+                  className="mt-3 inline-flex min-h-9 items-center gap-2 rounded-md bg-teal-700 px-3 py-2 text-xs font-bold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {approvingReplan ? "Approving replan…" : "Approve and apply replan"}
+                </button>
+              )}
+              <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+                {(replan.allocations || []).slice(0, 8).map((allocation: any) => (
+                  <li key={allocation.id} className="rounded border border-amber-200 bg-white p-2 text-xs text-slate-800">
+                    {allocation.resource_type?.replace(/_/g, " ")} ×{allocation.quantity} → {allocation.destination_id}
+                    <strong className="ml-2 uppercase">{allocation.status}</strong>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           <details className="border-t border-slate-200 pt-3 text-xs">
             <summary className="cursor-pointer font-semibold text-slate-600">{result.kind === "reset" ? "Technical reset response" : "Technical event response"}</summary>

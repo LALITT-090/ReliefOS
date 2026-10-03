@@ -11,7 +11,7 @@ Build a reliable, explainable, simulation-first disaster resource decision syste
                          │     Next.js UI        │
                          │ Dashboard / Map / Lab │
                          └───────────┬───────────┘
-                                     │ REST/WebSocket
+                                     │ REST
                                      ▼
                          ┌───────────────────────┐
                          │      FastAPI API       │
@@ -36,7 +36,7 @@ Build a reliable, explainable, simulation-first disaster resource decision syste
                          ▼
                 ┌─────────────────┐
                 │ Optimization    │
-                │ OR-Tools        │
+                │ Min-cost flow  │
                 └────────┬────────┘
                          ▼
                 ┌─────────────────┐
@@ -67,8 +67,14 @@ Backend Digital Twin owns operational state.
 ### ARCH-002 — Versioned state
 Every material state change increments `state_version`.
 
+Strategies are bound to both the scenario ID and state version used to generate them. Switching the active scenario invalidates approval from a previously active scenario.
+
 ### ARCH-003 — Snapshot optimization
 Optimizer consumes a state snapshot/version and returns a strategy.
+
+The active optimizer is a deterministic successive-shortest-path min-cost-flow
+implementation over shared resource and demand capacities. Reverse residual
+edges allow global reassignment across zones; it does not call OR-Tools.
 
 ### ARCH-004 — No optimizer mutation
 Optimization cannot directly mutate active state.
@@ -89,7 +95,7 @@ LLM cannot create/modify decision variables or constraints.
 All state-changing commands and operator decisions create audit events.
 
 ### ARCH-010 — Deterministic demo
-Primary scenario and chaos payloads are seeded.
+Urban Flood and Earthquake have deterministic, independently resettable scenario data and entity IDs.
 
 ### ARCH-011 — UI is not business authority
 No allocation logic should live only in the frontend.
@@ -100,7 +106,7 @@ No allocation logic should live only in the frontend.
 
 | ID | Service | Responsibility |
 |---|---|---|
-| ARCH-012 | Scenario Service | Load/reset/configure scenarios |
+| ARCH-012 | Scenario Service | Select and deterministically load/reset Urban Flood or Earthquake |
 | ARCH-013 | Digital Twin Service | Maintain canonical state |
 | ARCH-014 | Event Service | Validate/apply domain events |
 | ARCH-015 | Prediction Service | Forecast resource shortages |
@@ -182,25 +188,29 @@ When a chaos event occurs:
 6. Recompute relevant predictions.
 7. Recompute routes.
 8. Generate replacement strategies.
-9. Notify operator.
-10. Require approval.
-11. Supersede conflicting old allocations.
-12. Record complete history.
+9. Present the changed state and available impact information to the operator.
+10. The operator explicitly generates and reviews a replacement recommendation.
+11. Require approval before applying the replacement and superseding conflicting
+    active allocations.
+12. Record lifecycle and audit history. The event itself never reallocates.
 
 ---
 
 # 8. Database architecture
 
-PostgreSQL is the primary database.
+The application persists through the configured SQLAlchemy database URL. The
+local demonstration and tests use SQLite; PostgreSQL is a compatible deployment
+option, not evidence of a live operational deployment. The current demonstration
+uses a persisted synthetic road graph; external GIS ingestion is outside MVP.
 
-PostGIS is used for:
+Potential spatial extensions:
 - coordinates,
 - spatial queries,
 - zone/facility proximity,
 - road graph metadata where useful.
 
 Core tables:
-`scenarios, zones, hospitals, resource_sources, medicine_types, medicine_inventory, ambulances, road_nodes, road_edges, demands, incidents, forecasts, strategies, allocations, decisions, audit_events`.
+`scenarios, zones, hospitals, resource_sources, medicine_types, medicine_inventory, ambulances, road_nodes, road_edges, demands, incidents, forecasts, strategies, allocations, resource_passports, decisions, audit_events`.
 
 ---
 
@@ -258,17 +268,13 @@ backend/
 reliefos/
 ├── frontend/
 ├── backend/
-├── scenarios/
-│   ├── urban_flood_v1/
-│   │   ├── scenario.json
-│   │   ├── road_graph.json
-│   │   ├── demand_history.json
-│   │   └── scripted_events.json
-│   └── earthquake_v1/
+│   └── app/persistence/seed_data.py  # Urban Flood and Earthquake configurations
 ├── docs/
 ├── docker-compose.yml
 └── README.md
 ```
+
+Both current scenario configurations are seeded in the backend persistence module; separate GIS ingestion and external scenario files are not required for MVP.
 
 ---
 
@@ -296,7 +302,7 @@ For the hackathon, the system should remain usable locally with Docker Compose.
 |---|---|
 | DEC-001 | Next.js + React + TypeScript |
 | DEC-002 | Python + FastAPI |
-| DEC-003 | OR-Tools |
+| DEC-003 | Deterministic min-cost flow over the snapshot's shared supply/demand graph; no OR-Tools runtime dependency |
 | DEC-004 | PostgreSQL/PostGIS |
 | DEC-005 | Leaflet + OSM-compatible tiles |
 | DEC-006 | Digital Twin as backend authority |

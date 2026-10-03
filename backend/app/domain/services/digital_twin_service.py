@@ -430,6 +430,7 @@ class DigitalTwinService:
         """CE-004: Increase demand in a zone."""
         demands_result = await db.execute(
             select(Demand).where(
+                Demand.scenario_id == scenario_id,
                 Demand.zone_id == zone_id,
                 Demand.resource_type == resource_type,
                 Demand.status != "met",
@@ -439,7 +440,12 @@ class DigitalTwinService:
 
         if not demands:
             # Create new demand item
-            zone_result = await db.execute(select(Zone).where(Zone.id == zone_id))
+            zone_result = await db.execute(
+                select(Zone).where(
+                    Zone.id == zone_id,
+                    Zone.scenario_id == scenario_id,
+                )
+            )
             zone = zone_result.scalar_one_or_none()
             if not zone:
                 raise ValueError(f"Zone {zone_id} not found")
@@ -455,11 +461,16 @@ class DigitalTwinService:
             )
             db.add(new_demand)
         else:
-            # Increase existing demand
-            for d in demands:
-                d.quantity += increase_amount // len(demands)
+            quotient, remainder = divmod(increase_amount, len(demands))
+            for index, demand in enumerate(demands):
+                demand.quantity += quotient + (1 if index < remainder else 0)
 
-        zone_result2 = await db.execute(select(Zone).where(Zone.id == zone_id))
+        zone_result2 = await db.execute(
+            select(Zone).where(
+                Zone.id == zone_id,
+                Zone.scenario_id == scenario_id,
+            )
+        )
         zone2 = zone_result2.scalar_one_or_none()
         zone_name = zone2.name if zone2 else zone_id
 
@@ -499,22 +510,14 @@ class DigitalTwinService:
     ) -> dict:
         """CE-005: Reduce medicine inventory."""
         inv_result = await db.execute(
-            select(MedicineInventory).where(MedicineInventory.id == str(inventory_id))
+            select(MedicineInventory)
+            .join(ResourceSource, ResourceSource.id == MedicineInventory.source_id)
+            .where(
+                MedicineInventory.id == str(inventory_id),
+                ResourceSource.scenario_id == scenario_id,
+            )
         )
         inv = inv_result.scalar_one_or_none()
-        
-        if not inv:
-            # Fallback: look up by source_id
-            inv_res_src = await db.execute(
-                select(MedicineInventory).where(MedicineInventory.source_id == str(inventory_id))
-            )
-            inv = inv_res_src.scalars().first()
-
-        if not inv:
-            # Fallback: first inventory item
-            inv_res_first = await db.execute(select(MedicineInventory).limit(1))
-            inv = inv_res_first.scalar_one_or_none()
-
         if not inv:
             raise ValueError(f"Medicine inventory {inventory_id} not found")
 
@@ -576,6 +579,39 @@ class DigitalTwinService:
         db.add(node)
         await db.flush()
 
+        nearest_node_result = await db.execute(
+            select(RoadNode).where(RoadNode.scenario_id == scenario_id)
+        )
+        existing_nodes = [
+            road_node
+            for road_node in nearest_node_result.scalars().all()
+            if road_node.id != node.id
+        ]
+        if not existing_nodes:
+            raise ValueError("Cannot connect an incident zone to an empty road network")
+        nearest_node = min(
+            existing_nodes,
+            key=lambda road_node: (
+                (road_node.lat - node.lat) ** 2 + (road_node.lon - node.lon) ** 2,
+                road_node.id,
+            ),
+        )
+        lat_km = (node.lat - nearest_node.lat) * 111.0
+        lon_km = (node.lon - nearest_node.lon) * 85.0
+        distance_km = max(0.1, (lat_km ** 2 + lon_km ** 2) ** 0.5)
+        connector = RoadEdge(
+            id=str(uuid.uuid4()),
+            scenario_id=scenario_id,
+            from_node_id=nearest_node.id,
+            to_node_id=node.id,
+            name=f"Simulated connector to {zone_data['name']}",
+            distance_km=round(distance_km, 2),
+            base_travel_min=round(distance_km / 30.0 * 60.0, 2),
+            risk_score=0.1,
+            status=RoadEdgeStatus.OPEN,
+        )
+        db.add(connector)
+
         # Create the zone
         new_zone = Zone(
             id=str(uuid.uuid4()),
@@ -621,6 +657,9 @@ class DigitalTwinService:
                 "severity": new_zone.severity,
                 "affected_population": new_zone.affected_population,
                 "demand_count": len(new_demands),
+                "connector_edge_id": connector.id,
+                "connector_from_node_id": nearest_node.id,
+                "connector_travel_min": connector.base_travel_min,
                 "state_version": new_version,
             },
             scenario_id=scenario_id,

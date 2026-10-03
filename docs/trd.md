@@ -61,6 +61,8 @@
 | TR-037 | Core strategy generation target is <5 seconds on the seeded demo dataset. |
 | TR-038 | Tests must cover optimizer constraints, state transitions, reallocation and critical UI flow. |
 
+The MVP configurations are **Urban Flood — Metro District** (primary, seed 42) and **Earthquake — District Response** (alternate, seed 99). Each configuration has its own scenario/entity IDs, zones, hospitals, ambulances, typed inventory, demands and road graph. Scenario-scoped strategies, allocations and audit verification must remain isolated when the active scenario changes.
+
 ---
 
 # 3. Domain state model
@@ -166,6 +168,8 @@ Every accepted domain event:
 | API-014 | PATCH | `/api/v1/allocations/{id}/status` | Advance simulated lifecycle |
 | API-015 | GET | `/api/v1/audit` | Audit timeline |
 | API-016 | GET | `/api/v1/health` | Health check |
+| API-017 | GET | `/api/v1/allocations/{id}/passport` | Persisted allocation provenance, lifecycle and linked audit events |
+| API-018 | GET | `/api/v1/audit/verify` | Verify the active scenario's SHA-256 event chain |
 
 ---
 
@@ -229,6 +233,13 @@ Material re-planning events:
 
 The UI compares metrics; it does not hard-code a universal winner.
 
+The active implementation is deterministic min-cost flow across shared
+resource and demand capacities, with reverse residual edges for reassignment.
+It applies severity, urgency, forecast shortage pressure, route travel time and
+risk to assignment costs. Availability, typed-medicine reserves, ICU capacity
+and feasible network routes are hard constraints. This implementation does not
+use OR-Tools.
+
 ---
 
 # 8. Prediction technical specification
@@ -259,11 +270,14 @@ Prediction should influence optimization only when its configured confidence thr
 
 For MVP reliability, use:
 - a predefined road graph,
-- explicit edge distance/travel time,
+- explicit edge distance and scenario-provided `base_travel_min`,
 - road risk,
 - edge status (`normal`, `risky`, `blocked`).
 
-A routing provider can be added behind the same interface later.
+The route ETA is a deterministic synthetic estimate from those edge values, not
+measured travel time, live traffic, or a live routing-provider result. Route ETA
+and risk are used in assignment costs. A road closure excludes the blocked edge
+and can change both route feasibility and the recommendation.
 
 **Do not substitute straight-line distance silently.**
 
@@ -275,10 +289,10 @@ Every Strategy stores:
 `generated_state_version`.
 
 At approval:
-1. Fetch current Digital Twin version.
-2. Compare to strategy version.
-3. If no material change: allow approval.
-4. If material change: reject stale approval and require regeneration/revalidation.
+1. Fetch the active scenario ID and Digital Twin version.
+2. Compare both values to the strategy's scenario ID and generated state version.
+3. Allow approval only when the scenario matches and there is no material version change.
+4. Otherwise reject stale approval and require regeneration/revalidation in the active scenario.
 
 This prevents a recommendation from being applied to a materially different situation.
 
@@ -297,6 +311,10 @@ event_hash[n] =
 The database stores both hashes.
 
 No blockchain is required.
+Audit payloads include a generated event ID; Passport responses link the
+allocation's generated, approved and lifecycle events to their hashes and
+include the active scenario chain-verification result. This demonstrates
+payload-chain integrity verification, not signatures or tamper-proof storage.
 
 ---
 
@@ -308,7 +326,7 @@ No blockchain is required.
 - Python 3.11+.
 - FastAPI.
 - Pydantic.
-- OR-Tools.
+- Deterministic in-process min-cost flow (no OR-Tools dependency).
 - PostgreSQL/PostGIS.
 - pandas.
 - scikit-learn only if prediction needs it.

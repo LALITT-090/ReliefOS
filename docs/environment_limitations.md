@@ -12,8 +12,7 @@ This document outlines legitimate infrastructure limitations encountered in the 
 
 ## 2. Optimization Engine
 
-**Documented Target:** Google OR-Tools (CP-SAT / linear solver)  
-**Current Environment:** Windows Application Control policy (`[WinError 4551]`) blocks the loading of the `ortools` native C++ DLLs (via `ctypes`).  
-**Fallback Implemented:** Deterministic custom heuristic algorithm.  
-**Isolation:** The heuristic is contained entirely within `backend/app/optimization/optimizer.py`. The interface (`OptimizationEngine.generate_strategy`) strictly matches the documented architecture, taking a versioned snapshot and returning standard structured allocation metrics. The fallback respects all constraints (road blockages, available capacities, typed medicines).  
-**Status:** BLOCKED BY ENVIRONMENT. OR-Tools cannot be used without disabling Windows security policies. The fallback is active.
+**Historical target:** Google OR-Tools (CP-SAT / linear solver).
+**Current implementation:** Deterministic successive-shortest-path min-cost flow in `backend/app/optimization/optimizer.py`; OR-Tools is not a runtime dependency.
+**Behavior:** The optimizer runs across shared supply and demand capacities, supports residual-path reassignment, and uses severity, urgency, shortage pressure, synthetic route ETA and route risk in assignment costs. Availability, typed-medicine reserves, ICU capacity and feasible road-network routes remain hard constraints.
+**Status:** The custom solver is the active implementation, not an environment fallback. The earlier Windows native-DLL limitation explains why the original OR-Tools target was not retained; it does not block the current solver.

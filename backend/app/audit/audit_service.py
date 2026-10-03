@@ -5,6 +5,7 @@ TR-028..030, ARCH-009: Every state mutation creates an audit event.
 """
 import json
 import hashlib
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,16 +39,19 @@ class AuditService:
         result = await db.execute(
             select(AuditEvent.event_hash)
             .where(AuditEvent.scenario_id == scenario_id if scenario_id else True)
-            .order_by(AuditEvent.timestamp.desc())
+            .order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc())
             .limit(1)
         )
         last_hash_row = result.first()
         previous_hash = last_hash_row[0] if last_hash_row else "0" * 64
 
         # Compute this event's hash
-        event_hash = AuditEvent.compute_hash(payload, previous_hash)
+        event_id = str(uuid.uuid4())
+        hashed_payload = {**payload, "audit_event_id": event_id}
+        event_hash = AuditEvent.compute_hash(hashed_payload, previous_hash)
 
         audit_event = AuditEvent(
+            id=event_id,
             scenario_id=scenario_id,
             event_type=event_type,
             actor=actor,
@@ -55,7 +59,7 @@ class AuditService:
             entity_id=entity_id,
             previous_hash=previous_hash,
             event_hash=event_hash,
-            payload_json=payload,
+            payload_json=hashed_payload,
             timestamp=datetime.now(timezone.utc),
         )
         db.add(audit_event)
@@ -70,7 +74,7 @@ class AuditService:
         offset: int = 0,
     ) -> list:
         """Get audit events in chronological order."""
-        query = select(AuditEvent).order_by(AuditEvent.timestamp.asc())
+        query = select(AuditEvent).order_by(AuditEvent.timestamp.asc(), AuditEvent.id.asc())
         if scenario_id:
             query = query.where(AuditEvent.scenario_id == scenario_id)
         query = query.limit(limit).offset(offset)

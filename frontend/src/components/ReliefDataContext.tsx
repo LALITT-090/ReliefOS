@@ -39,42 +39,50 @@ export function ReliefDataProvider({
   const allocationsRef = useRef<any[]>([]);
 
   const refreshSnapshot = useCallback((force = false) => {
-    if (inFlight.current) return inFlight.current;
+    const fetchSnapshot = () => {
+      const request = Promise.all([
+        axios.get(`${API_BASE_URL}/v1/twin`),
+        axios.get(`${API_BASE_URL}/v1/allocations`),
+      ])
+        .then(([twinRes, allocationRes]) => {
+          const nextTwin = twinRes.data;
+          const nextAllocations = allocationRes.data.allocations || [];
+          twinRef.current = nextTwin;
+          allocationsRef.current = nextAllocations;
+          setTwin((current: any) =>
+            current?.state_version === nextTwin.state_version &&
+            current?.scenario?.id === nextTwin.scenario?.id ? current : nextTwin
+          );
+          setAllocations((current) =>
+            JSON.stringify(current) === JSON.stringify(nextAllocations) ? current : nextAllocations
+          );
+          lastSuccessfulFetch.current = Date.now();
+          setError(null);
+          setLoading(false);
+          return { twin: nextTwin, allocations: nextAllocations };
+        })
+        .catch((requestError) => {
+          setError(requestError);
+          setLoading(false);
+          throw requestError;
+        })
+        .finally(() => {
+          inFlight.current = null;
+        });
+
+      inFlight.current = request;
+      return request;
+    };
+
+    if (inFlight.current) {
+      if (!force) return inFlight.current;
+      return inFlight.current.then(fetchSnapshot, fetchSnapshot);
+    }
     if (!force && Date.now() - lastSuccessfulFetch.current < 1500) {
       return Promise.resolve({ twin: twinRef.current, allocations: allocationsRef.current });
     }
 
-    const request = Promise.all([
-      axios.get(`${API_BASE_URL}/v1/twin`),
-      axios.get(`${API_BASE_URL}/v1/allocations`),
-    ])
-      .then(([twinRes, allocationRes]) => {
-        const nextTwin = twinRes.data;
-        const nextAllocations = allocationRes.data.allocations || [];
-        twinRef.current = nextTwin;
-        allocationsRef.current = nextAllocations;
-        setTwin((current: any) =>
-          current?.state_version === nextTwin.state_version ? current : nextTwin
-        );
-        setAllocations((current) =>
-          JSON.stringify(current) === JSON.stringify(nextAllocations) ? current : nextAllocations
-        );
-        lastSuccessfulFetch.current = Date.now();
-        setError(null);
-        setLoading(false);
-        return { twin: nextTwin, allocations: nextAllocations };
-      })
-      .catch((requestError) => {
-        setError(requestError);
-        setLoading(false);
-        throw requestError;
-      })
-      .finally(() => {
-        inFlight.current = null;
-      });
-
-    inFlight.current = request;
-    return request;
+    return fetchSnapshot();
   }, []);
 
   useEffect(() => {

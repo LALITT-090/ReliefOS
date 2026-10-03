@@ -1,14 +1,12 @@
 """
-ReliefOS — OR-Tools Optimization Engine
-Generates feasible allocation strategies.
-ARCH-003/004: Works on state snapshot, never mutates live state.
-BR-001..009, BR-017..019: Hard constraints never violated.
+ReliefOS deterministic min-cost flow optimizer.
+
+ARCH-003/004: Works on a state snapshot and never mutates live state.
+BR-001..009, BR-017..019: Hard constraints are enforced before scoring.
 """
-from typing import List, Dict, Optional, Tuple
+from typing import Callable, List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 import time
-
-ORTOOLS_AVAILABLE = False
 
 from app.routing.routing_service import RoutingService, RouteResult
 
@@ -110,6 +108,26 @@ class StrategyResult:
     solve_time_sec: float
 
 
+@dataclass
+class _NetworkSupply:
+    id: str
+    name: str
+    road_node_id: str
+    capacity: int
+    destination_id: Optional[str] = None
+    destination_name: Optional[str] = None
+    medicine_type_id: Optional[str] = None
+
+
+@dataclass
+class _ResidualEdge:
+    to: int
+    reverse_index: int
+    capacity: int
+    cost: int
+    initial_capacity: int
+
+
 # Severity weights for objective
 SEVERITY_WEIGHTS = {
     "critical": 8.0,
@@ -157,8 +175,7 @@ MODE_WEIGHTS = {
 
 class OptimizationEngine:
     """
-    OR-Tools based optimization engine.
-    Uses CP-SAT for constraint satisfaction and objective minimization.
+    Deterministic min-cost flow optimization over a Digital Twin snapshot.
 
     ARCH-003: Works only on a snapshot — never touches live Digital Twin.
     ARCH-004: Returns strategy results, does NOT commit to DB.
@@ -170,7 +187,7 @@ class OptimizationEngine:
     def generate_strategy(self, opt_input: OptimizationInput) -> StrategyResult:
         """
         Generate one feasible allocation strategy.
-        Uses heuristic optimization with OR-Tools CP-SAT for constraint enforcement.
+        Uses global min-cost flow assignments with explicit resource capacities.
         """
         start_time = time.time()
 
@@ -192,59 +209,154 @@ class OptimizationEngine:
         weights: Dict[str, float],
     ) -> StrategyResult:
         """
-        Core optimization using greedy heuristic with constraint enforcement.
-        OR-Tools CP-SAT used for integer assignment problems.
+        Optimize each shared resource pool across all demand zones at once.
         """
         allocations: List[AllocationDecision] = []
-        evidence_factors: List[dict] = []
+        demands_by_type = {
+            resource_type: [
+                demand for demand in inp.demands + inp.icu_demands
+                if demand.resource_type == resource_type
+            ]
+            for resource_type in ("ambulance", "medicine", "icu_bed")
+        }
+        ambulance_supplies = [
+            _NetworkSupply(
+                id=ambulance.id,
+                name=ambulance.name,
+                road_node_id=ambulance.road_node_id,
+                capacity=1,
+            )
+            for ambulance in inp.ambulances
+            if ambulance.status == "available" and ambulance.road_node_id
+        ]
+        hospital_supplies = [
+            _NetworkSupply(
+                id=hospital["id"],
+                name=hospital["name"],
+                road_node_id=hospital["road_node_id"],
+                capacity=max(0, int(hospital.get("icu_available", 0))),
+                destination_id=hospital["id"],
+                destination_name=hospital["name"],
+            )
+            for hospital in inp.hospitals
+            if hospital.get("road_node_id") and int(hospital.get("icu_available", 0)) > 0
+        ]
+        medicine_supplies = [
+            _NetworkSupply(
+                id=supply.id,
+                name=supply.name,
+                road_node_id=supply.source_road_node_id,
+                capacity=max(0, supply.quantity_available - supply.reserve_quantity),
+                medicine_type_id=supply.medicine_type_id,
+            )
+            for supply in inp.medicine_supplies
+            if supply.resource_type == "medicine"
+            and supply.source_road_node_id
+            and supply.medicine_type_id
+        ]
 
-        # Track used resources (hard constraints)
-        used_ambulance_ids = set()
-        used_medicine_qty: Dict[Tuple[str, str], int] = {}  # (source_id, med_type_id) -> used
-        used_icu_qty: Dict[str, int] = {}  # hospital_id -> used
-        
-        total_demand = 0
-        met_demand = 0
+        for resource_type, supplies in (
+            ("ambulance", ambulance_supplies),
+            ("medicine", medicine_supplies),
+            ("icu_bed", hospital_supplies),
+        ):
+            resource_demands = demands_by_type[resource_type]
 
-        # Sort demands by priority (based on strategy mode)
-        sorted_demands = self._sort_demands(inp.demands + inp.icu_demands, inp.mode, weights)
-
-        for demand in sorted_demands:
-            total_demand += demand.quantity
-            
-            if demand.resource_type == "ambulance":
-                alloc = self._allocate_ambulance(
-                    demand, inp, used_ambulance_ids, weights
+            def route_for(supply: _NetworkSupply, demand: DemandItem) -> Optional[RouteResult]:
+                if not demand.zone_road_node_id:
+                    return None
+                source_node = (
+                    demand.zone_road_node_id
+                    if resource_type == "icu_bed"
+                    else supply.road_node_id
                 )
-                if alloc:
-                    allocations.append(alloc)
-                    met_demand += alloc.quantity
-                    if alloc.vehicle_id:
-                        used_ambulance_ids.add(alloc.vehicle_id)
-                    
-            elif demand.resource_type == "medicine":
-                alloc = self._allocate_medicine(
-                    demand, inp, used_medicine_qty, weights
+                destination_node = (
+                    supply.road_node_id
+                    if resource_type == "icu_bed"
+                    else demand.zone_road_node_id
                 )
-                if alloc:
-                    allocations.append(alloc)
-                    met_demand += alloc.quantity
-                    key = (alloc.source_id, demand.medicine_type_id)
-                    used_medicine_qty[key] = used_medicine_qty.get(key, 0) + alloc.quantity
-
-            elif demand.resource_type == "icu_bed":
-                alloc = self._allocate_icu(
-                    demand, inp, used_icu_qty, weights
+                if resource_type == "medicine" and supply.medicine_type_id != demand.medicine_type_id:
+                    return None
+                return self.routing.find_route(
+                    source_node,
+                    destination_node,
+                    weight="distance_km" if inp.mode == "baseline_nearest" else "travel_min",
+                    exclude_blocked=True,
                 )
-                if alloc:
-                    allocations.append(alloc)
-                    met_demand += alloc.quantity
-                    if alloc.destination_id:
-                        used_icu_qty[alloc.destination_id] = (
-                            used_icu_qty.get(alloc.destination_id, 0) + alloc.quantity
-                        )
 
-        # Build global evidence
+            assignments = self._globally_assign(
+                resource_demands, supplies, route_for, inp, weights
+            )
+            for demand, supply, route, quantity in assignments:
+                if resource_type == "ambulance":
+                    allocations.append(AllocationDecision(
+                        resource_type=resource_type,
+                        source_id=None,
+                        source_name=f"Station ({supply.name})",
+                        destination_id=demand.zone_id,
+                        destination_name=demand.zone_name,
+                        destination_type="zone",
+                        quantity=quantity,
+                        vehicle_id=supply.id,
+                        vehicle_name=supply.name,
+                        medicine_type_id=None,
+                        route_node_ids=route.node_ids,
+                        route_distance_km=route.distance_km,
+                        route_travel_min=route.travel_min,
+                        route_risk=route.risk_score,
+                        demand_id=demand.id,
+                        evidence_factors=self._allocation_evidence(demand, supply, route),
+                    ))
+                elif resource_type == "medicine":
+                    allocations.append(AllocationDecision(
+                        resource_type=resource_type,
+                        source_id=supply.id,
+                        source_name=supply.name,
+                        destination_id=demand.zone_id,
+                        destination_name=demand.zone_name,
+                        destination_type="zone",
+                        quantity=quantity,
+                        vehicle_id=None,
+                        vehicle_name=None,
+                        medicine_type_id=demand.medicine_type_id,
+                        route_node_ids=route.node_ids,
+                        route_distance_km=route.distance_km,
+                        route_travel_min=route.travel_min,
+                        route_risk=route.risk_score,
+                        demand_id=demand.id,
+                        evidence_factors=self._allocation_evidence(demand, supply, route),
+                    ))
+                else:
+                    allocations.append(AllocationDecision(
+                        resource_type=resource_type,
+                        source_id=demand.zone_id,
+                        source_name=demand.zone_name,
+                        destination_id=supply.id,
+                        destination_name=supply.name,
+                        destination_type="hospital",
+                        quantity=quantity,
+                        vehicle_id=None,
+                        vehicle_name=None,
+                        medicine_type_id=None,
+                        route_node_ids=route.node_ids,
+                        route_distance_km=route.distance_km,
+                        route_travel_min=route.travel_min,
+                        route_risk=route.risk_score,
+                        demand_id=demand.id,
+                        evidence_factors=self._allocation_evidence(demand, supply, route),
+                    ))
+
+        allocations.sort(key=lambda allocation: (
+            allocation.resource_type,
+            allocation.destination_id,
+            allocation.source_id or allocation.vehicle_id or "",
+            allocation.demand_id or "",
+        ))
+        total_demand = sum(
+            max(0, demand.quantity)
+            for demand in inp.demands + inp.icu_demands
+        )
+        met_demand = sum(allocation.quantity for allocation in allocations)
         evidence_factors = self._build_strategy_evidence(
             inp, allocations, total_demand, met_demand
         )
@@ -267,15 +379,12 @@ class OptimizationEngine:
             if f.get("horizon_min") == 60  # Use T+60 as primary
         )
 
-        # Compute score (lower is better — represents cost)
-        w = weights
         score = (
-            w["w1_unmet_demand"] * unmet
-            + w["w2_travel_time"] * avg_eta
-            + w["w3_route_risk"] * avg_risk * 100
-            + w["w5_shortage"] * shortage_impact
+            weights["w1_unmet_demand"] * unmet
+            + weights["w2_travel_time"] * avg_eta
+            + weights["w3_route_risk"] * avg_risk * 100
+            + weights["w5_shortage"] * shortage_impact
         )
-
         return StrategyResult(
             mode=inp.mode,
             is_feasible=True,
@@ -291,6 +400,186 @@ class OptimizationEngine:
             evidence_factors=evidence_factors,
             solve_time_sec=0.0,
         )
+
+    def _globally_assign(
+        self,
+        demands: List[DemandItem],
+        supplies: List[_NetworkSupply],
+        route_for: Callable[[_NetworkSupply, DemandItem], Optional[RouteResult]],
+        inp: OptimizationInput,
+        weights: Dict[str, float],
+    ) -> List[Tuple[DemandItem, _NetworkSupply, RouteResult, int]]:
+        """Min-cost flow matches all demand nodes against shared supply capacities."""
+        if not demands or not supplies:
+            return []
+
+        source = 0
+        supply_offset = 1
+        demand_offset = supply_offset + len(supplies)
+        sink = demand_offset + len(demands)
+        graph: List[List[_ResidualEdge]] = [[] for _ in range(sink + 1)]
+
+        def add_edge(start: int, end: int, capacity: int, cost: int) -> _ResidualEdge:
+            forward = _ResidualEdge(end, len(graph[end]), capacity, cost, capacity)
+            reverse = _ResidualEdge(start, len(graph[start]), 0, -cost, 0)
+            graph[start].append(forward)
+            graph[end].append(reverse)
+            return forward
+
+        for index, supply in enumerate(supplies):
+            add_edge(source, supply_offset + index, max(0, supply.capacity), 0)
+        for index, demand in enumerate(demands):
+            add_edge(
+                demand_offset + index,
+                sink,
+                max(0, demand.quantity),
+                0,
+            )
+
+        assignment_edges: List[
+            Tuple[int, int, RouteResult, _ResidualEdge]
+        ] = []
+        for supply_index, supply in enumerate(supplies):
+            for demand_index, demand in enumerate(demands):
+                route = route_for(supply, demand)
+                if not route or not route.feasible:
+                    continue
+                shortage_pressure = self._shortage_pressure(inp.forecasts, demand)
+                urgency_weight = {"immediate": 3.0, "urgent": 2.0, "routine": 1.0}.get(
+                    demand.urgency, 1.0
+                )
+                priority_reward = (
+                    demand.severity_weight * weights["w1_unmet_demand"] * 10.0
+                    + urgency_weight * weights["w1_unmet_demand"] * 3.0
+                    + weights["w6_coverage"] * 2.0
+                    + shortage_pressure * weights["w5_shortage"] * 5.0
+                )
+                route_cost = (
+                    route.travel_min * weights["w2_travel_time"]
+                    + route.risk_score * weights["w3_route_risk"] * 10.0
+                )
+                edge_cost = int(round((route_cost - priority_reward) * 1000))
+                edge = add_edge(
+                    supply_offset + supply_index,
+                    demand_offset + demand_index,
+                    min(supply.capacity, max(0, demand.quantity)),
+                    edge_cost,
+                )
+                assignment_edges.append((supply_index, demand_index, route, edge))
+
+        # Successive shortest augmenting paths can reroute earlier assignments
+        # through reverse edges, so a locally attractive match is not final.
+        while True:
+            infinity = 10**30
+            distances = [infinity] * len(graph)
+            previous: List[Optional[Tuple[int, int]]] = [None] * len(graph)
+            in_queue = [False] * len(graph)
+            queue = [source]
+            distances[source] = 0
+            in_queue[source] = True
+            queue_index = 0
+            while queue_index < len(queue):
+                node = queue[queue_index]
+                queue_index += 1
+                in_queue[node] = False
+                for edge_index, edge in enumerate(graph[node]):
+                    if edge.capacity <= 0:
+                        continue
+                    candidate = distances[node] + edge.cost
+                    if candidate < distances[edge.to]:
+                        distances[edge.to] = candidate
+                        previous[edge.to] = (node, edge_index)
+                        if not in_queue[edge.to]:
+                            queue.append(edge.to)
+                            in_queue[edge.to] = True
+            if previous[sink] is None or distances[sink] >= 0:
+                break
+
+            flow = infinity
+            node = sink
+            while node != source:
+                prior_node, edge_index = previous[node]
+                flow = min(flow, graph[prior_node][edge_index].capacity)
+                node = prior_node
+            node = sink
+            while node != source:
+                prior_node, edge_index = previous[node]
+                edge = graph[prior_node][edge_index]
+                edge.capacity -= flow
+                graph[node][edge.reverse_index].capacity += flow
+                node = prior_node
+
+        assignments = []
+        for supply_index, demand_index, route, edge in assignment_edges:
+            quantity = edge.initial_capacity - edge.capacity
+            if quantity > 0:
+                assignments.append((
+                    demands[demand_index],
+                    supplies[supply_index],
+                    route,
+                    quantity,
+                ))
+        return assignments
+
+    @staticmethod
+    def _shortage_pressure(forecasts: List[dict], demand: DemandItem) -> float:
+        relevant = [
+            forecast for forecast in forecasts
+            if forecast.get("resource_type") == demand.resource_type
+            and forecast.get("zone_id") in (None, demand.zone_id)
+            and (
+                demand.resource_type != "medicine"
+                or forecast.get("medicine_type_id") == demand.medicine_type_id
+            )
+        ]
+        if not relevant:
+            return 0.0
+        shortage_ratio = max(
+            (
+                float(forecast.get("shortage_estimate", 0))
+                / max(float(forecast.get("predicted_demand", 0)), 1.0)
+            )
+            for forecast in relevant
+        )
+        risk_bonus = max(
+            (
+                1.0 if forecast.get("risk_level") == "critical"
+                else 0.5 if forecast.get("risk_level") == "high"
+                else 0.0
+            )
+            for forecast in relevant
+        )
+        return min(1.0, shortage_ratio) + risk_bonus
+
+    @staticmethod
+    def _allocation_evidence(
+        demand: DemandItem,
+        supply: _NetworkSupply,
+        route: RouteResult,
+    ) -> List[dict]:
+        return [
+            {
+                "factor_type": "severity",
+                "factor_name": f"{demand.severity.title()} priority at {demand.zone_name}",
+                "value": demand.severity,
+                "contribution": demand.severity_weight,
+                "source_ref": demand.id,
+            },
+            {
+                "factor_type": "resource_availability",
+                "factor_name": f"{supply.name} available",
+                "value": str(supply.capacity),
+                "contribution": 1.0,
+                "source_ref": supply.id,
+            },
+            {
+                "factor_type": "travel_time",
+                "factor_name": f"Estimated network travel to {demand.zone_name}",
+                "value": f"{route.travel_min:.1f} min",
+                "contribution": -route.travel_min,
+                "source_ref": f"route:{supply.road_node_id}->{demand.zone_road_node_id}",
+            },
+        ]
 
     def _sort_demands(
         self,
@@ -625,7 +914,11 @@ class OptimizationEngine:
             })
 
         # Count demand by severity
-        critical_demands = [d for d in inp.demands if d.severity == "critical"]
+        critical_demands = [
+            demand
+            for demand in inp.demands + inp.icu_demands
+            if demand.severity == "critical"
+        ]
         if critical_demands:
             evidence.append({
                 "factor_type": "severity",
