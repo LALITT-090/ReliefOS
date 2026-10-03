@@ -40,23 +40,32 @@ export function ReliefDataProvider({
 
   const refreshSnapshot = useCallback((force = false) => {
     const fetchSnapshot = () => {
-      const request = Promise.all([
+      const request = Promise.allSettled([
         axios.get(`${API_BASE_URL}/v1/twin`),
         axios.get(`${API_BASE_URL}/v1/allocations`),
       ])
-        .then(([twinRes, allocationRes]) => {
-          const nextTwin = twinRes.data;
-          const nextAllocations = allocationRes.data.allocations || [];
+        .then(([twinResult, allocationsResult]) => {
+          if (twinResult.status === "rejected") {
+            throw twinResult.reason;
+          }
+
+          const nextTwin = twinResult.value.data;
           twinRef.current = nextTwin;
-          allocationsRef.current = nextAllocations;
           setTwin((current: any) =>
             current?.state_version === nextTwin.state_version &&
             current?.scenario?.id === nextTwin.scenario?.id ? current : nextTwin
           );
+          lastSuccessfulFetch.current = Date.now();
+
+          if (allocationsResult.status === "rejected") {
+            throw allocationsResult.reason;
+          }
+
+          const nextAllocations = allocationsResult.value.data.allocations || [];
+          allocationsRef.current = nextAllocations;
           setAllocations((current) =>
             JSON.stringify(current) === JSON.stringify(nextAllocations) ? current : nextAllocations
           );
-          lastSuccessfulFetch.current = Date.now();
           setError(null);
           setLoading(false);
           return { twin: nextTwin, allocations: nextAllocations };

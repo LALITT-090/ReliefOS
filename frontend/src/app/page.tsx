@@ -50,25 +50,8 @@ export default function Overview() {
       setSupportingDataError(null);
       setLastUpdated(new Date());
       setLoading(false);
-    } catch (err: any) {
-      if (err.response?.status === 404) {
-        // Automatically ensure initial scenario is loaded if database was fresh
-        try {
-          await axios.post(`${API_BASE_URL}/v1/scenarios/00000000-0000-0000-0000-000000000001/load`);
-          const [, predRes, auditRes] = await Promise.all([
-            refreshSnapshot(true),
-            axios.get(`${API_BASE_URL}/v1/predictions`),
-            axios.get(`${API_BASE_URL}/v1/audit`),
-          ]);
-          setPredictions(predRes.data.forecasts || []);
-          setAudit(auditRes.data.events || []);
-          setLastUpdated(new Date());
-        } catch {
-          setSupportingDataError("Scenario setup or supporting overview data could not be loaded. Refresh to retry.");
-        }
-      } else {
-        setSupportingDataError("Some overview data could not be loaded. Refresh to retry.");
-      }
+    } catch {
+      setSupportingDataError("Some overview data could not be loaded. Refresh to retry.");
     } finally {
       setLoading(false);
       if (isManual) setIsRefreshing(false);
