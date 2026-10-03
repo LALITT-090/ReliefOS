@@ -1,19 +1,15 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API_BASE_URL } from "@/lib/api";
+import { useReliefData } from "@/components/ReliefDataContext";
 import {
   TrendingUp,
-  AlertTriangle,
-  ShieldCheck,
-  Clock,
   RefreshCw,
   Info,
   ChevronDown,
   ChevronUp,
-  AlertOctagon,
-  CheckCircle2
 } from "lucide-react";
 
 interface ForecastOutput {
@@ -56,31 +52,39 @@ const safeNum = (val: any, digits = 1, fallback = "N/A"): string => {
 };
 
 export default function Predictions() {
+  const { twin } = useReliefData();
   const [predictions, setPredictions] = useState<ForecastOutput[]>([]);
-  const [twin, setTwin] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [filterRisk, setFilterRisk] = useState<string>("all");
+  const requestRef = useRef<Promise<void> | null>(null);
 
-  const loadData = async () => {
-    try {
-      const [predRes, twinRes] = await Promise.all([
-        axios.get(`${API_BASE_URL}/v1/predictions`),
-        axios.get(`${API_BASE_URL}/v1/twin`)
-      ]);
-      setPredictions(predRes.data.forecasts || []);
-      setTwin(twinRes.data);
-      setLoading(false);
-    } catch (err) {
-      console.error("Failed to load predictions:", err);
-    }
-  };
+  const loadData = useCallback(() => {
+    if (requestRef.current) return requestRef.current;
+
+    const request = axios.get(`${API_BASE_URL}/v1/predictions`)
+      .then((predRes) => {
+        setPredictions(predRes.data.forecasts || []);
+        setLoadError(null);
+      })
+      .catch(() => {
+        setLoadError("Forecasts could not be loaded. Use refresh to try again.");
+      })
+      .finally(() => {
+        requestRef.current = null;
+        setLoading(false);
+      });
+
+    requestRef.current = request;
+    return request;
+  }, []);
 
   useEffect(() => {
-    loadData();
+    void loadData();
     const interval = setInterval(loadData, 4000);
     return () => clearInterval(interval);
-  }, []);
+  }, [loadData]);
 
   const zoneMap = useMemo(() => new Map((twin?.zones || []).map((z: any) => [z.id, z])), [twin]);
 
@@ -164,194 +168,110 @@ export default function Predictions() {
     }
   };
 
+  const getHorizonStatus = (forecast?: ForecastOutput) => {
+    if (!forecast) return { label: "No estimate available", color: "#6B7280", background: "#F3F4F6" };
+    const shortage = Number(forecast.shortage_estimate) || 0;
+    const risk = forecast.risk_level?.toLowerCase();
+    if (shortage > 0 && risk === "critical") return { label: "Critical shortage likely", color: "#B91C1C", background: "#FEF2F2" };
+    if (shortage > 0) return { label: "Shortage likely", color: "#C2410C", background: "#FFF7ED" };
+    if (risk === "critical") return { label: "Critical demand", color: "#B91C1C", background: "#FEF2F2" };
+    if (risk === "high") return { label: "At risk", color: "#C2410C", background: "#FFF7ED" };
+    if (risk === "medium") return { label: "Monitor", color: "#A16207", background: "#FFFBEB" };
+    return { label: "Likely covered", color: "#15803D", background: "#F0FDF4" };
+  };
+
   return (
-    <div className="space-y-6 max-w-7xl mx-auto pb-12">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-800/80 p-5 rounded-xl border border-slate-700">
+    <div className="space-y-5 max-w-7xl mx-auto pb-12">
+      <div className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm md:flex-row md:items-center md:justify-between">
         <div>
-          <div className="flex items-center gap-2">
-            <TrendingUp className="text-blue-400" size={24} />
-            <h1 className="text-2xl font-bold text-white">Future Shortage Forecasting Engine</h1>
-          </div>
-          <p className="text-slate-400 text-sm mt-1">
-            Deterministic prediction based on measured demand, severity multipliers, and consumption rates across <strong>T+30</strong>, <strong>T+60</strong>, and <strong>T+120</strong> horizons.
-          </p>
+          <div className="inline-flex items-center gap-2 rounded-md bg-orange-50 px-2.5 py-1 text-[10px] font-extrabold tracking-wide text-orange-800"><TrendingUp size={13} /> SIMULATION FORECAST</div>
+          <h1 className="mt-2 text-2xl font-bold text-slate-900">Predicted Resource Demand</h1>
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-slate-600">Deterministic estimate based on current simulated demand and resource availability. It is not a guaranteed real-world prediction.</p>
         </div>
 
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-700 text-xs">
-            <span className="text-slate-400">Risk Filter:</span>
+          <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs">
+            <span className="text-slate-500">Priority:</span>
             <select
               value={filterRisk}
               onChange={(e) => setFilterRisk(e.target.value)}
-              className="bg-transparent text-slate-200 font-semibold focus:outline-none cursor-pointer"
+              className="bg-transparent font-semibold text-slate-700 focus:outline-none cursor-pointer"
             >
-              <option value="all" className="bg-slate-800 text-white">All Levels ({groupedForecasts.length})</option>
-              <option value="critical" className="bg-slate-800 text-rose-300">Critical Only</option>
-              <option value="high" className="bg-slate-800 text-amber-300">High Only</option>
-              <option value="medium" className="bg-slate-800 text-yellow-300">Medium Only</option>
-              <option value="low" className="bg-slate-800 text-emerald-300">Low Only</option>
+              <option value="all">All Levels ({groupedForecasts.length})</option>
+              <option value="critical">Critical Only</option>
+              <option value="high">High Only</option>
+              <option value="medium">Medium Only</option>
+              <option value="low">Low Only</option>
             </select>
           </div>
 
           <button
             onClick={loadData}
+            aria-label="Refresh forecasts"
             className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-slate-200 border border-slate-600 transition"
-            title="Refresh predictions"
+            title="Refresh forecasts"
           >
             <RefreshCw size={16} />
           </button>
         </div>
       </div>
 
-      {/* Prediction Matrix Table */}
-      <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden shadow-xl">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm text-left">
-            <thead className="text-xs text-slate-400 bg-slate-900/90 uppercase border-b border-slate-700">
-              <tr>
-                <th className="px-5 py-3.5">Zone / Target Location</th>
-                <th className="px-5 py-3.5">Resource Class</th>
-                <th className="px-5 py-3.5">Measured Base</th>
-                <th className="px-5 py-3.5 text-amber-300">T+30 min (Demand / Shortage)</th>
-                <th className="px-5 py-3.5 text-orange-400">T+60 min (Demand / Shortage)</th>
-                <th className="px-5 py-3.5 text-rose-400">T+120 min (Demand / Shortage)</th>
-                <th className="px-5 py-3.5">Overall Risk</th>
-                <th className="px-5 py-3.5 text-right">Evidence</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-700/60">
-              {loading && (
-                <tr>
-                  <td colSpan={8} className="px-6 py-10 text-center text-slate-400">
-                    <RefreshCw className="animate-spin inline-block mr-2" size={16} />
-                    Calculating deterministic forecast vectors...
-                  </td>
-                </tr>
-              )}
+      {loadError && <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{loadError}</div>}
 
-              {!loading && filteredList.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="px-6 py-12 text-center text-slate-400">
-                    No forecast vectors match the selected filter.
-                  </td>
-                </tr>
-              )}
+      <div className="space-y-4">
+        {loading && <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500"><RefreshCw className="mr-2 inline animate-spin" size={16} />Loading simulated forecasts…</div>}
+        {!loading && filteredList.length === 0 && <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">No forecasts match this priority filter.</div>}
+        {filteredList.map((item) => {
+          const isExpanded = expandedKeys.has(item.key);
+          const horizons = [{ label: "30-minute forecast", data: item.t30 }, { label: "60-minute forecast", data: item.t60 }, { label: "2-hour forecast", data: item.t120 }];
+          const unit = item.resource_type.replace(/_/g, " ");
+          return (
+            <article key={item.key} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-col gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{item.zone_name}</div>
+                  <h2 className="mt-1 text-lg font-extrabold uppercase text-slate-900">{unit}{item.medicine_type_code ? ` · ${item.medicine_type_code}` : ""}</h2>
+                  <p className="mt-1 text-xs text-slate-600">Current supply: <strong className="text-slate-900">{safeNum(item.current_quantity, 0)} {unit}</strong></p>
+                </div>
+                {getRiskBadge(item.max_risk)}
+              </div>
 
-              {filteredList.map((item) => {
-                const isExpanded = expandedKeys.has(item.key);
-                const hasCriticalShortage = (item.t120?.shortage_estimate || 0) > 0 || item.max_risk === "critical";
-
-                return (
-                  <tr
-                    key={item.key}
-                    className={`transition ${
-                      hasCriticalShortage ? "bg-rose-950/15 hover:bg-rose-950/25" : "hover:bg-slate-700/30"
-                    }`}
-                  >
-                    {/* Zone */}
-                    <td className="px-5 py-4 font-semibold text-white">
-                      <div>{item.zone_name}</div>
-                    </td>
-
-                    {/* Resource */}
-                    <td className="px-5 py-4">
-                      <span className="px-2 py-0.5 rounded text-xs font-semibold bg-slate-900 text-slate-300 border border-slate-700">
-                        {item.resource_type.toUpperCase()}
-                        {item.medicine_type_code ? ` (${item.medicine_type_code})` : ""}
-                      </span>
-                    </td>
-
-                    {/* Measured Base */}
-                    <td className="px-5 py-4 font-mono text-slate-300">
-                      {safeNum(item.current_quantity, 1)} units
-                    </td>
-
-                    {/* T+30 min */}
-                    <td className="px-5 py-4 font-mono text-xs">
-                      {item.t30 ? (
-                        <div>
-                          <span className="text-amber-300 font-bold">{safeNum(item.t30.predicted_demand, 1)} req</span>
-                          {(item.t30.shortage_estimate || 0) > 0 ? (
-                            <span className="ml-2 text-rose-400 font-bold bg-rose-950/60 px-1.5 py-0.5 rounded border border-rose-800">
-                              -{safeNum(item.t30.shortage_estimate, 1)}
-                            </span>
-                          ) : (
-                            <span className="ml-2 text-emerald-400 text-[11px] font-sans">covered</span>
-                          )}
-                          <div className="text-[10px] text-slate-500 font-sans">
-                            CI: [{safeNum(item.t30.lower_bound, 1)}–{safeNum(item.t30.upper_bound, 1)}]
-                          </div>
+              <div className="grid gap-3 pt-4 md:grid-cols-3">
+                {horizons.map(({ label, data }) => {
+                  const status = getHorizonStatus(data);
+                  return (
+                    <section key={label} className="rounded-lg border border-slate-200 p-4">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</div>
+                      {data ? <>
+                        <div className="mt-2 text-xs text-slate-600">Expected demand</div>
+                        <div className="text-xl font-extrabold text-slate-900">~{safeNum(data.predicted_demand, 0)} <span className="text-xs font-semibold">{unit}</span></div>
+                        <div className="mt-2 text-xs text-slate-600">Expected shortage</div>
+                        <div className="text-sm font-bold" style={{ color: (data.shortage_estimate || 0) > 0 ? status.color : "#15803D" }}>{(data.shortage_estimate || 0) > 0 ? `${safeNum(data.shortage_estimate, 0)} ${unit}` : "None predicted"}</div>
+                      </> : <div className="mt-3 text-sm text-slate-500">No estimate available</div>}
+                      <div className="mt-3 rounded-md px-2.5 py-2 text-xs font-extrabold" style={{ color: status.color, backgroundColor: status.background }}>{status.label}</div>
+                      {data && <details className="mt-2 text-[10px]">
+                        <summary className="cursor-pointer font-semibold text-slate-500">Technical details</summary>
+                        <div className="mt-2 space-y-1 text-slate-600">
+                          <div>Raw estimate: {safeNum(data.predicted_demand, 1)} units</div>
+                          <div>Range: {safeNum(data.lower_bound, 1)}–{safeNum(data.upper_bound, 1)}</div>
+                          <div>Confidence: {data.confidence ? `${Math.round(data.confidence * 100)}%` : "Not provided"}</div>
+                          <div>Risk level: {data.risk_level}</div>
                         </div>
-                      ) : (
-                        <span className="text-slate-500">Unavailable</span>
-                      )}
-                    </td>
+                      </details>}
+                    </section>
+                  );
+                })}
+              </div>
 
-                    {/* T+60 min */}
-                    <td className="px-5 py-4 font-mono text-xs">
-                      {item.t60 ? (
-                        <div>
-                          <span className="text-orange-400 font-bold">{safeNum(item.t60.predicted_demand, 1)} req</span>
-                          {(item.t60.shortage_estimate || 0) > 0 ? (
-                            <span className="ml-2 text-rose-400 font-bold bg-rose-950/60 px-1.5 py-0.5 rounded border border-rose-800">
-                              -{safeNum(item.t60.shortage_estimate, 1)}
-                            </span>
-                          ) : (
-                            <span className="ml-2 text-emerald-400 text-[11px] font-sans">covered</span>
-                          )}
-                          <div className="text-[10px] text-slate-500 font-sans">
-                            CI: [{safeNum(item.t60.lower_bound, 1)}–{safeNum(item.t60.upper_bound, 1)}]
-                          </div>
-                        </div>
-                      ) : (
-                        <span className="text-slate-500">Unavailable</span>
-                      )}
-                    </td>
-
-                    {/* T+120 min */}
-                    <td className="px-5 py-4 font-mono text-xs">
-                      {item.t120 ? (
-                        <div>
-                          <span className="text-rose-400 font-bold">{safeNum(item.t120.predicted_demand, 1)} req</span>
-                          {(item.t120.shortage_estimate || 0) > 0 ? (
-                            <span className="ml-2 text-rose-300 font-bold bg-rose-900 px-1.5 py-0.5 rounded border border-rose-700">
-                              -{safeNum(item.t120.shortage_estimate, 1)}
-                            </span>
-                          ) : (
-                            <span className="ml-2 text-emerald-400 text-[11px] font-sans">covered</span>
-                          )}
-                          <div className="text-[10px] text-slate-500 font-sans">
-                            CI: [{safeNum(item.t120.lower_bound, 1)}–{safeNum(item.t120.upper_bound, 1)}]
-                          </div>
-                        </div>
-                      ) : (
-                        <span className="text-slate-500">Unavailable</span>
-                      )}
-                    </td>
-
-                    {/* Risk Badge */}
-                    <td className="px-5 py-4">
-                      {getRiskBadge(item.max_risk)}
-                    </td>
-
-                    {/* Evidence Toggle */}
-                    <td className="px-5 py-4 text-right">
-                      <button
-                        onClick={() => toggleExpand(item.key)}
-                        className="px-2.5 py-1 text-xs text-blue-400 hover:text-blue-300 bg-slate-900 rounded border border-slate-700 hover:border-slate-500 inline-flex items-center gap-1 transition"
-                      >
-                        <Info size={13} />
-                        <span>Evidence</span>
-                        {isExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+              <div className="mt-4 flex flex-col gap-3 border-t border-slate-100 pt-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-xs text-slate-700"><strong>Why is this predicted?</strong> {item.drivers[0] || "No additional prediction driver was returned for this resource."}</div>
+                <button onClick={() => toggleExpand(item.key)} className="inline-flex shrink-0 items-center gap-1 text-xs font-bold text-teal-800 hover:text-teal-950" aria-expanded={isExpanded}>
+                  <Info size={13} /> {isExpanded ? "Hide evidence" : "Evidence"} {isExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                </button>
+              </div>
+            </article>
+          );
+        })}
       </div>
 
       {/* Expanded Drivers and Evidence Panel */}
@@ -387,9 +307,9 @@ export default function Predictions() {
               <div>
                 <h4 className="font-semibold text-slate-300 mb-1.5 uppercase tracking-wider text-[11px]">Model Integrity (TR-017)</h4>
                 <div className="bg-slate-900 p-3 rounded-lg border border-slate-700 space-y-1 text-slate-300 font-mono text-[11px]">
-                  <div>T+30 Confidence: <strong>{item.t30?.confidence ? `${Math.round(item.t30.confidence * 100)}%` : "N/A"}</strong></div>
-                  <div>T+60 Confidence: <strong>{item.t60?.confidence ? `${Math.round(item.t60.confidence * 100)}%` : "N/A"}</strong></div>
-                  <div>T+120 Confidence: <strong>{item.t120?.confidence ? `${Math.round(item.t120.confidence * 100)}%` : "N/A"}</strong></div>
+                  <div>30-minute forecast confidence: <strong>{item.t30?.confidence ? `${Math.round(item.t30.confidence * 100)}%` : "N/A"}</strong></div>
+                  <div>60-minute forecast confidence: <strong>{item.t60?.confidence ? `${Math.round(item.t60.confidence * 100)}%` : "N/A"}</strong></div>
+                  <div>2-hour forecast confidence: <strong>{item.t120?.confidence ? `${Math.round(item.t120.confidence * 100)}%` : "N/A"}</strong></div>
                   <div className="text-[10px] text-slate-400 font-sans mt-2 pt-1 border-t border-slate-800">
                     Label: <strong>ESTIMATE</strong> (Deterministic Trend + Multiplier). Not fact.
                   </div>

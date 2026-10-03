@@ -23,12 +23,16 @@ import {
   RotateCcw
 } from "lucide-react";
 import Link from "next/link";
+import OverviewMapPreview from "@/components/OverviewMapPreview";
+import { useReliefData } from "@/components/ReliefDataContext";
 
 export default function Overview() {
-  const [twin, setTwin] = useState<any>(null);
-  const [allocations, setAllocations] = useState<any[]>([]);
+  const { twin, allocations, refreshSnapshot, error: snapshotError } = useReliefData();
   const [predictions, setPredictions] = useState<any[]>([]);
   const [audit, setAudit] = useState<any[]>([]);
+  const [latestRecommendation, setLatestRecommendation] = useState<any>(null);
+  const [supportingDataError, setSupportingDataError] = useState<string | null>(null);
+  const [recommendationError, setRecommendationError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
@@ -36,16 +40,14 @@ export default function Overview() {
   const fetchData = useCallback(async (isManual = false) => {
     if (isManual) setIsRefreshing(true);
     try {
-      const [twinRes, allocRes, predRes, auditRes] = await Promise.all([
-        axios.get(`${API_BASE_URL}/v1/twin`),
-        axios.get(`${API_BASE_URL}/v1/allocations`),
+      const [, predRes, auditRes] = await Promise.all([
+        refreshSnapshot(isManual),
         axios.get(`${API_BASE_URL}/v1/predictions`),
         axios.get(`${API_BASE_URL}/v1/audit`)
       ]);
-      setTwin(twinRes.data);
-      setAllocations(allocRes.data.allocations || []);
       setPredictions(predRes.data.forecasts || []);
       setAudit(auditRes.data.events || []);
+      setSupportingDataError(null);
       setLastUpdated(new Date());
       setLoading(false);
     } catch (err: any) {
@@ -53,18 +55,25 @@ export default function Overview() {
         // Automatically ensure initial scenario is loaded if database was fresh
         try {
           await axios.post(`${API_BASE_URL}/v1/scenarios/00000000-0000-0000-0000-000000000001/load`);
-          const retryRes = await axios.get(`${API_BASE_URL}/v1/twin`);
-          setTwin(retryRes.data);
-          setLoading(false);
-        } catch (innerErr) {
-          console.error("Failed to load scenario on 404:", innerErr);
+          const [, predRes, auditRes] = await Promise.all([
+            refreshSnapshot(true),
+            axios.get(`${API_BASE_URL}/v1/predictions`),
+            axios.get(`${API_BASE_URL}/v1/audit`),
+          ]);
+          setPredictions(predRes.data.forecasts || []);
+          setAudit(auditRes.data.events || []);
+          setLastUpdated(new Date());
+        } catch {
+          setSupportingDataError("Scenario setup or supporting overview data could not be loaded. Refresh to retry.");
         }
+      } else {
+        setSupportingDataError("Some overview data could not be loaded. Refresh to retry.");
       }
-      console.error("API error in Overview:", err);
     } finally {
+      setLoading(false);
       if (isManual) setIsRefreshing(false);
     }
-  }, []);
+  }, [refreshSnapshot]);
 
   useEffect(() => {
     fetchData();
@@ -72,19 +81,41 @@ export default function Overview() {
     return () => clearInterval(interval);
   }, [fetchData]);
 
-  if (loading && !twin) {
+  const latestStrategyEvent = [...audit].reverse().find((event: any) => event.event_type === "strategy_generated");
+  const latestStrategyId = latestStrategyEvent?.entity_id;
+
+  useEffect(() => {
+    if (!latestStrategyId) {
+      setLatestRecommendation(null);
+      setRecommendationError(null);
+      return;
+    }
+    let active = true;
+    axios.get(`${API_BASE_URL}/v1/strategies/${latestStrategyId}`)
+      .then((res) => { if (active) { setLatestRecommendation(res.data); setRecommendationError(null); } })
+      .catch(() => { if (active) setRecommendationError("The latest candidate details could not be loaded. Open Strategy Lab to review candidates."); });
+    return () => { active = false; };
+  }, [latestStrategyId]);
+
+  if (!twin && snapshotError) {
     return (
-      <div className="flex h-96 flex-col items-center justify-center space-y-4 text-slate-400">
-        <RefreshCw className="animate-spin text-blue-500" size={36} />
-        <span className="text-lg font-medium">Connecting to Digital Twin Engine...</span>
+      <div className="rounded-xl border border-rose-200 bg-white p-6 text-sm text-rose-700">
+        Unable to load Digital Twin. Please ensure the backend is available at {API_BASE_URL}.
       </div>
     );
   }
 
   if (!twin) {
     return (
-      <div className="p-8 text-center text-red-400 bg-red-950/20 border border-red-800 rounded-lg">
-        Unable to load Digital Twin. Please ensure the backend is running at {API_BASE_URL}.
+      <div className="max-w-7xl space-y-6 pb-12" aria-busy="true" aria-label="Loading emergency command center">
+        <div className="h-28 animate-pulse rounded-xl border border-slate-200 bg-white" />
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+          {Array.from({ length: 8 }, (_, index) => <div key={index} className="h-28 animate-pulse rounded-xl border border-slate-200 bg-white" />)}
+        </div>
+        <div className="grid gap-6 lg:grid-cols-3">
+          <div className="h-72 animate-pulse rounded-xl border border-slate-200 bg-white lg:col-span-2" />
+          <div className="h-72 animate-pulse rounded-xl border border-slate-200 bg-white" />
+        </div>
       </div>
     );
   }
@@ -112,8 +143,14 @@ export default function Overview() {
 
   const totalMedicineStock = twin.medicine_inventory?.reduce((acc: number, m: any) => acc + (m.quantity_available || 0), 0) || 0;
   const shortMedicines = twin.medicine_inventory?.filter((m: any) => (m.quantity_available || 0) < (m.reserve_quantity || 0)) || [];
+  const overloadedHospitals = twin.hospitals?.filter((hospital: any) => String(hospital.status).toLowerCase().includes("overload")) || [];
 
-  const activeAllocs = allocations.filter((a: any) => ["proposed", "approved", "in_transit", "dispatched"].includes(a.status?.toLowerCase())) || [];
+  const activeAllocs = allocations.filter((a: any) => ["approved", "dispatched", "in_transit"].includes(a.status?.toLowerCase())) || [];
+  const proposedAllocs = allocations.filter((a: any) => a.status?.toLowerCase() === "proposed") || [];
+  const approvedAllocsCount = activeAllocs.filter((a: any) => a.status?.toLowerCase() === "approved").length;
+  const inTransitAllocsCount = activeAllocs.filter((a: any) => a.status?.toLowerCase() === "in_transit").length;
+  const scenarioTechnicalId = String(twin.scenario?.disaster_type || "active_incident").toUpperCase();
+  const scenarioPlainName = scenarioTechnicalId.toLowerCase().split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
   const activeAllocsCount = activeAllocs.length;
 
   // Road Network status
@@ -125,6 +162,39 @@ export default function Overview() {
 
   // Recent Activity & Alerts
   const recentAudit = [...audit].reverse().slice(0, 6);
+  const auditSummary = (event: any) => {
+    const type = String(event.event_type || "").toLowerCase();
+    const payload = event.payload_json || event.payload || {};
+    if (type === "road_status_changed") return `Road ${payload.edge_name || "segment"} became ${payload.new_status || "unavailable"}.`;
+    if (type === "chaos_event_applied") return Number(payload.impacted_count || 0) > 0
+      ? `${payload.impacted_count} active allocation(s) were flagged for review.`
+      : "The simulation checked active movements; none were identified as affected.";
+    if (type === "strategy_generated") return `A ${String(payload.mode || "strategy").replace(/_/g, " ")} plan was prepared for operator review.`;
+    if (type === "strategy_approved") return `${payload.allocations_count ?? "The proposed"} resource placement(s) were approved by an operator.`;
+    if (type === "allocation_status_changed") return `Movement status changed from ${payload.old_status || "previous status"} to ${payload.new_status || "updated status"}.`;
+    if (type === "hospital_capacity_changed") return `${payload.hospital_name || "Simulated facility"} ICU availability changed from ${payload.old_icu_available ?? "--"} to ${payload.new_icu_available ?? "--"}.`;
+    if (type === "scenario_loaded" || type === "scenario_reset") return "The simulation scenario was loaded with synthetic operational values.";
+    return type.replace(/_/g, " ").replace(/^./, (letter) => letter.toUpperCase()) + " recorded.";
+  };
+  const auditTone = (eventType: string = "") => {
+    const type = eventType.toLowerCase();
+    if (type.includes("road_status") || type.includes("failure") || type.includes("reject")) return "critical";
+    if (type.includes("hospital") || type.includes("demand") || type.includes("medicine")) return "urgent";
+    if (type.includes("generated") || type.includes("chaos")) return "moderate";
+    return "stable";
+  };
+  const demoAuditPreview = [
+    { time: "10:08", title: "ROAD BLOCK", summary: "Demo: a simulated road segment became unavailable.", tone: "critical" },
+    { time: "10:10", title: "PLAN REVIEW", summary: "Demo: a proposed movement is waiting for operator approval.", tone: "moderate" },
+    { time: "10:11", title: "OPERATOR APPROVAL", summary: "Demo: an operator approved a candidate plan.", tone: "stable" },
+  ];
+  const demoDeploymentPreview = [
+    { resource: "Ambulance", quantity: "2 units", source: "Central Response Base", destination: "Zone B — Central Market", status: "IN TRANSIT · DEMO", distance: "4.8 km", eta: "12 min" },
+    { resource: "IV fluids", quantity: "20 packs", source: "Medical Warehouse", destination: "Zone D — Riverside", status: "APPROVED · DEMO", distance: "3.2 km", eta: "9 min" },
+  ];
+  const latestStrategyDecision = latestStrategyEvent && audit.find((event: any) =>
+    event.entity_id === latestStrategyId && ["strategy_approved", "strategy_rejected"].includes(event.event_type)
+  );
   const predictionWarnings = (predictions || []).filter(
     (p: any) =>
       p.risk_level === "critical" ||
@@ -143,8 +213,9 @@ export default function Overview() {
               <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
             </span>
             <h1 className="text-2xl font-bold tracking-tight text-white">Emergency Command Center</h1>
-            <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-blue-900/60 text-blue-300 border border-blue-700">
-              {twin.scenario?.disaster_type?.toUpperCase() || "ACTIVE INCIDENT"}
+            <span className="scenario-identity-badge" aria-label={`${scenarioPlainName}. Active simulation scenario`} title={`Scenario type: ${scenarioTechnicalId}`}>
+              <strong>{scenarioPlainName}</strong>
+              <span>Active simulation scenario</span>
             </span>
           </div>
           <p className="text-sm text-slate-400 flex items-center gap-2">
@@ -167,13 +238,16 @@ export default function Overview() {
           <button
             onClick={() => fetchData(true)}
             disabled={isRefreshing}
+            aria-label="Refresh current scenario state"
             className="p-2.5 bg-slate-700/60 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg border border-slate-600 transition"
-            title="Force refresh state snapshot"
+            title="Refresh current scenario state"
           >
             <RefreshCw size={18} className={isRefreshing ? "animate-spin text-blue-400" : ""} />
           </button>
         </div>
       </div>
+
+      {supportingDataError && <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">{supportingDataError}</div>}
 
       {/* Primary KPI Grid (8 Cards) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -218,7 +292,7 @@ export default function Overview() {
         {/* Unmet Critical Demand */}
         <div className="bg-slate-800/90 p-4 rounded-xl border border-slate-700/80 flex flex-col justify-between hover:border-slate-600 transition">
           <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-300">Unmet Demands</span>
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-300" title="Demand items that have not yet been fulfilled">Unmet critical demand</span>
             <AlertTriangle size={18} className={criticalDemandsCount > 0 ? "text-rose-400" : "text-amber-400"} />
           </div>
           <div>
@@ -226,7 +300,7 @@ export default function Overview() {
               {criticalDemandsCount} <span className="text-base font-medium text-slate-400">crit</span>
             </div>
             <div className="mt-1 text-xs text-slate-400">
-              <span>{unmetDemands.length} total pending ({highDemandsCount} high)</span>
+              <span>{unmetDemands.length} items still need resources ({highDemandsCount} high)</span>
             </div>
           </div>
         </div>
@@ -282,7 +356,7 @@ export default function Overview() {
         {/* Active Allocations */}
         <div className="bg-slate-800/90 p-4 rounded-xl border border-slate-700/80 flex flex-col justify-between hover:border-slate-600 transition">
           <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-300">Active Allocations</span>
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-300">Active deployments</span>
             <Activity size={18} className="text-blue-400" />
           </div>
           <div>
@@ -290,8 +364,9 @@ export default function Overview() {
               {activeAllocsCount}
             </div>
             <div className="mt-1 text-xs text-slate-400">
-              {allocations.filter((a: any) => a.status === "approved").length} approved • {allocations.filter((a: any) => a.status === "in_transit").length} in transit
+              {approvedAllocsCount} approved • {inTransitAllocsCount} in transit
             </div>
+            {proposedAllocs.length > 0 && <div className="mt-1 text-[11px] font-semibold text-amber-700">{proposedAllocs.length} proposed, awaiting operator decision</div>}
           </div>
         </div>
 
@@ -311,6 +386,20 @@ export default function Overview() {
           </div>
         </div>
       </div>
+
+      <section className={`rounded-xl border bg-white p-5 shadow-sm ${criticalDemandsCount > 0 || blockedRoads.length > 0 || overloadedHospitals.length > 0 ? "border-rose-200" : "border-slate-200"}`} aria-labelledby="attention-heading">
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+          <h2 id="attention-heading" className="text-sm font-extrabold text-slate-900">Immediate Attention</h2>
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Current operational risks</span>
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          {criticalDemandsCount > 0 && <div className="rounded-md border border-rose-200 bg-rose-50 p-3"><div className="text-[10px] font-extrabold uppercase text-rose-800">Critical demand</div><div className="mt-1 text-xs text-rose-900">{criticalDemandsCount} critical demand item(s) remain unmet.</div></div>}
+          {blockedRoads.length > 0 && <div className="rounded-md border border-rose-200 bg-rose-50 p-3"><div className="text-[10px] font-extrabold uppercase text-rose-800">Blocked routes</div><div className="mt-1 text-xs text-rose-900">{blockedRoads.length} road segment(s) are blocked.</div></div>}
+          {overloadedHospitals.length > 0 && <div className="rounded-md border border-orange-200 bg-orange-50 p-3"><div className="text-[10px] font-extrabold uppercase text-orange-800">Facility overload</div><div className="mt-1 text-xs text-orange-900">{overloadedHospitals.length} simulated facility/facilities report overload.</div></div>}
+          {shortMedicines.length > 0 && <div className="rounded-md border border-orange-200 bg-orange-50 p-3"><div className="text-[10px] font-extrabold uppercase text-orange-800">Reserve shortage</div><div className="mt-1 text-xs text-orange-900">{shortMedicines.length} medicine stock item(s) are below reserve.</div></div>}
+          {criticalDemandsCount === 0 && blockedRoads.length === 0 && overloadedHospitals.length === 0 && shortMedicines.length === 0 && <div className="text-xs font-semibold text-green-800">No critical demand, blocked road, facility overload, or reserve-stock alert is reported in the current state.</div>}
+        </div>
+      </section>
 
       {/* Middle Section: Zone Demand Matrix & Shortage Alerts */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -341,6 +430,18 @@ export default function Overview() {
                   const zoneDemands = unmetDemands.filter((d: any) => d.zone_id === z.id);
                   const isCrit = z.severity === "critical";
                   const isHigh = z.severity === "high";
+                  const hasUnmetCriticalDemand = zoneDemands.some((d: any) => d.severity === "critical");
+                  const hasForecastShortage = predictionWarnings.some((forecast: any) => forecast.zone_id === z.id && forecast.shortage_estimate > 0);
+                  const rawStatus = String(z.status || "active").toLowerCase();
+                  const zoneStatus = hasUnmetCriticalDemand
+                    ? { label: "CRITICAL", detail: "Unmet critical demand requires immediate attention.", color: "#B91C1C", background: "#FEF2F2" }
+                    : hasForecastShortage && zoneDemands.length === 0
+                    ? { label: "AT RISK", detail: "Current demand is covered, but a future shortage is predicted.", color: "#C2410C", background: "#FFF7ED" }
+                    : zoneDemands.length > 0
+                    ? { label: "ACTIVE", detail: "Current resource demand is still unresolved.", color: "#A16207", background: "#FFFBEB" }
+                    : ["resolved", "closed", "complete", "completed"].includes(rawStatus)
+                    ? { label: "RESOLVED", detail: "The scenario reports this zone as resolved.", color: "#15803D", background: "#F0FDF4" }
+                    : { label: rawStatus.toUpperCase(), detail: `Backend scenario status: ${rawStatus}. Review pending demand and forecasts for urgency.`, color: "#4B5563", background: "#F3F4F6" };
                   return (
                     <tr key={z.id} className="hover:bg-slate-700/30 transition">
                       <td className="py-3 px-3 font-semibold text-white">
@@ -375,8 +476,11 @@ export default function Overview() {
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-3 text-xs text-slate-400 capitalize">
-                        {z.status || "active"}
+                      <td className="py-3 px-3">
+                        <span title={zoneStatus.detail} className="inline-flex rounded-md border px-2 py-1 text-[10px] font-extrabold tracking-wide" style={{ color: zoneStatus.color, backgroundColor: zoneStatus.background, borderColor: `${zoneStatus.color}40` }}>
+                          {zoneStatus.label}
+                        </span>
+                        <div className="mt-1 max-w-48 text-[10px] text-slate-500">{zoneStatus.detail}</div>
                       </td>
                     </tr>
                   );
@@ -401,7 +505,7 @@ export default function Overview() {
             <div className="space-y-3 overflow-y-auto max-h-80 pr-1">
               {predictionWarnings.length === 0 && shortMedicines.length === 0 && (
                 <div className="p-4 text-center text-sm text-slate-500 bg-slate-900/40 rounded-lg border border-slate-800">
-                  No critical shortage warnings detected in current T+30/60 horizon.
+                  No critical shortage warnings detected in the current 30-minute and 60-minute forecasts.
                 </div>
               )}
 
@@ -424,7 +528,13 @@ export default function Overview() {
                 const demandVal = typeof pw.predicted_demand === "number" ? pw.predicted_demand.toFixed(1) : "N/A";
                 const baseVal = typeof pw.current_quantity === "number" ? pw.current_quantity.toFixed(1) : "N/A";
                 const shortageVal = typeof pw.shortage_estimate === "number" && pw.shortage_estimate > 0 ? ` (Shortage: -${pw.shortage_estimate.toFixed(1)})` : "";
-                const horizon = pw.horizon_min ? `T+${pw.horizon_min}` : "T+60";
+                const horizon = pw.horizon_min === 30
+                  ? "30-minute forecast"
+                  : pw.horizon_min === 60
+                  ? "60-minute forecast"
+                  : pw.horizon_min === 120
+                  ? "2-hour forecast"
+                  : "60-minute forecast";
 
                 return (
                   <div key={`pw-${idx}`} className="p-3 bg-amber-950/30 border border-amber-800/60 rounded-lg text-xs">
@@ -452,95 +562,171 @@ export default function Overview() {
         </div>
       </div>
 
-      {/* Bottom Section: Recent Audit Log & Active Allocations Feed */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Recent Audit Feed */}
-        <div className="bg-slate-800/80 rounded-xl border border-slate-700 p-5 flex flex-col">
-          <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-700">
-            <h2 className="text-lg font-bold text-white flex items-center gap-2">
-              <ShieldCheck size={18} className="text-emerald-400" /> Cryptographic Audit Feed
-            </h2>
-            <Link href="/audit" className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1">
-              Full Audit Timeline <ArrowRight size={13} />
-            </Link>
-          </div>
-
-          <div className="space-y-3 flex-1 overflow-y-auto max-h-72 pr-1">
-            {recentAudit.length === 0 && (
-              <div className="text-xs text-slate-500 text-center py-6">No audit records yet.</div>
-            )}
-            {recentAudit.map((ev: any, idx: number) => (
-              <div key={idx} className="p-3 bg-slate-900/80 rounded-lg border border-slate-700/80 text-xs">
-                <div className="flex justify-between items-start mb-1">
-                  <span className="font-bold text-blue-300">{ev.event_type?.replace(/_/g, " ")}</span>
-                  <span className="text-[11px] text-slate-500 font-mono">
-                    {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : "--"}
-                  </span>
-                </div>
-                <div className="text-slate-400 text-[11px] flex items-center justify-between">
-                  <span>Actor: <strong className="text-slate-300">{ev.actor || ev.actor_id}</strong></span>
-                  <span className="font-mono text-[10px] text-slate-500 truncate max-w-[150px]">
-                    Hash: {(ev.event_hash || ev.hash)?.substring(0, 16)}...
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Active Deployment Summary & Chaos Simulator Shortcut */}
-        <div className="bg-slate-800/80 rounded-xl border border-slate-700 p-5 flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-700">
-              <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                <Radio size={18} className="text-blue-400" /> Active Deployments & Fast Actions
-              </h2>
-              <Link href="/allocations" className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1">
-                Resource Passport <ArrowRight size={13} />
-              </Link>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <section className="order-2 rounded-xl border border-slate-200 bg-white p-5 shadow-sm lg:col-span-2">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-wider text-teal-700">Live operational picture</div>
+              <h2 className="mt-1 text-lg font-bold text-slate-900">Response Network</h2>
             </div>
+            <Link href="/map" className="flex items-center gap-1 text-xs font-semibold text-teal-700 hover:text-teal-900">Open full map <ArrowRight size={14} /></Link>
+          </div>
+          <div className="h-[320px] overflow-hidden rounded-lg border border-slate-200">
+            <OverviewMapPreview twin={twin} allocations={allocations} />
+          </div>
+          <p className="mt-2 text-[10px] text-slate-500">SIMULATION DATA — Facility labels are scenario references; operational values are synthetic and do not imply a real incident.</p>
+        </section>
 
-            {activeAllocs.length > 0 ? (
-              <div className="space-y-2.5 max-h-56 overflow-y-auto pr-1">
-                {activeAllocs.slice(0, 5).map((a: any, idx: number) => (
-                  <div key={idx} className="p-2.5 bg-slate-900/80 rounded-lg border border-slate-700 text-xs flex items-center justify-between">
-                    <div>
-                      <div className="font-semibold text-slate-200">
-                        {a.resource_type?.toUpperCase()} (x{a.quantity})
-                      </div>
-                      <div className="text-[11px] text-slate-400">
-                        Route: {a.route_distance_km ? `${a.route_distance_km.toFixed(1)} km` : "N/A"} • ETA: {a.route_travel_min ? `${Math.round(a.route_travel_min)} min` : "N/A"}
-                      </div>
+        <section className="order-1 flex flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-sm lg:col-span-1">
+          <div className="flex items-center gap-2 text-teal-700">
+            <Activity size={18} />
+            <h2 className="text-sm font-bold text-slate-900">Latest Recommendation</h2>
+          </div>
+          {latestRecommendation ? (
+            <>
+              <div className="mt-4 rounded-lg border-l-4 border-amber-400 bg-amber-50 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-extrabold uppercase text-slate-900">{latestRecommendation.strategy?.mode?.replace(/_/g, " ") || "Candidate strategy"}</div>
+                  <span className={`rounded px-2 py-1 text-[9px] font-extrabold uppercase ${latestStrategyDecision?.event_type === "strategy_approved" ? "bg-green-100 text-green-800" : latestStrategyDecision?.event_type === "strategy_rejected" ? "bg-rose-100 text-rose-800" : "bg-orange-100 text-orange-900"}`}>
+                    {latestStrategyDecision?.event_type === "strategy_approved" ? "Operator approved" : latestStrategyDecision?.event_type === "strategy_rejected" ? "Operator rejected" : "Approval required"}
+                  </span>
+                </div>
+                <p className="mt-2 text-xs leading-relaxed text-slate-700">{latestRecommendation.explanation?.mode_rationale || latestRecommendation.explanation?.recommendation_summary}</p>
+                {latestRecommendation.explanation?.estimated_impact && <div className="mt-3 space-y-1 border-t border-amber-200 pt-2 text-[10px] text-slate-700">{Object.entries(latestRecommendation.explanation.estimated_impact).map(([label, value]: [string, any]) => <div key={label} className="flex justify-between gap-2"><span className="capitalize text-slate-500">{label.replace(/_/g, " ")}</span><strong className="text-right">{value}</strong></div>)}</div>}
+              </div>
+              <p className="mt-3 text-[11px] text-slate-600">Recommendations do not commit resources until an operator approves them.</p>
+            </>
+          ) : (
+            <div className="mt-4 border-l-2 border-slate-300 pl-3">
+              <div className="text-xs font-semibold text-slate-800">{recommendationError ? "Recommendation details unavailable" : "No candidate recommendation loaded"}</div>
+              <p className="mt-1 text-xs leading-relaxed text-slate-600">{recommendationError || "Generate and compare strategies against the current state to review evidence-backed options."}</p>
+            </div>
+          )}
+          <Link href="/strategy-lab" className="mt-auto inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-blue-500">
+            <Activity size={14} /> Review Strategies
+          </Link>
+        </section>
+      </div>
+
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+        <section className="overview-feed-panel" aria-labelledby="overview-audit-heading">
+          <header className="overview-feed-header">
+            <div>
+              <div className="overview-section-kicker">Response history</div>
+              <h2 id="overview-audit-heading" className="overview-section-title"><ShieldCheck size={19} /> Cryptographic Audit Feed</h2>
+              <p className="overview-section-subtitle">What changed and who made the decision</p>
+            </div>
+            <Link href="/audit" className="overview-secondary-link">Full timeline <ArrowRight size={14} /></Link>
+          </header>
+          <div className="overview-live-label"><span className="overview-live-dot" /> Simulation records · synthetic operational scenario</div>
+
+          {recentAudit.length > 0 ? (
+            <div className="overview-audit-list">
+              {recentAudit.map((event: any, index: number) => (
+                <article key={event.id || index} className="overview-audit-row">
+                  <span className={`overview-audit-marker tone-${auditTone(event.event_type)}`} aria-hidden="true" />
+                  <div className="overview-audit-content">
+                    <div className="overview-audit-topline">
+                      <h3>{String(event.event_type || "event").replace(/_/g, " ")}</h3>
+                      <time dateTime={event.timestamp}>{event.timestamp ? new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "--:--"}</time>
                     </div>
-                    <span className="px-2 py-0.5 rounded text-[11px] font-semibold uppercase bg-emerald-950 text-emerald-300 border border-emerald-800">
-                      {a.status}
-                    </span>
+                    <p>{auditSummary(event)}</p>
+                    <div className="overview-audit-meta">Recorded by {event.actor || event.actor_id || "System"}</div>
+                    <details className="overview-technical-details">
+                      <summary>Technical record</summary>
+                      <div className="overview-technical-grid">
+                        <span>Event ID</span><code>{event.id || "Unavailable"}</code>
+                        <span>Entity</span><code>{event.entity_type || "--"}: {event.entity_id || "--"}</code>
+                        <span>SHA-256</span><code>{event.event_hash || event.hash || "Unavailable"}</code>
+                        <span>Previous hash</span><code>{event.previous_hash || "Unavailable"}</code>
+                      </div>
+                    </details>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div className="p-6 text-center text-xs text-slate-400 bg-slate-900/40 rounded-lg border border-slate-800">
-                <p className="mb-2">No active resource deployments currently running.</p>
-                <p className="text-slate-500">Go to Strategy Lab to optimize resource allocation and approve plans.</p>
-              </div>
-            )}
-          </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="overview-empty-message">No live audit entries have been recorded in this scenario yet.</p>
+          )}
 
-          <div className="mt-4 pt-4 border-t border-slate-700 flex gap-3">
-            <Link
-              href="/simulation"
-              className="flex-1 py-2 px-3 bg-red-950/60 hover:bg-red-900/80 border border-red-800 text-red-200 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition"
-            >
-              <AlertOctagon size={14} /> Chaos Sandbox
-            </Link>
-            <Link
-              href="/strategy-lab"
-              className="flex-1 py-2 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition"
-            >
-              <Activity size={14} /> Strategy Lab
-            </Link>
+          {recentAudit.length < 3 && (
+            <div className="overview-demo-preview">
+              <div className="overview-demo-heading">DEMO PREVIEW · SYNTHETIC · NOT LIVE</div>
+              {demoAuditPreview.slice(0, 3 - recentAudit.length).map((event) => (
+                <div className="overview-demo-row" key={event.title}>
+                  <time>{event.time}</time>
+                  <span className={`overview-audit-marker tone-${event.tone}`} aria-hidden="true" />
+                  <div><strong>{event.title}</strong><p>{event.summary}</p></div>
+                </div>
+              ))}
+              <p className="overview-demo-disclaimer">Illustrative response sequence only. These examples are not stored audit events and have no cryptographic record.</p>
+            </div>
+          )}
+        </section>
+
+        <section className="overview-feed-panel" aria-labelledby="overview-deployments-heading">
+          <header className="overview-feed-header">
+            <div>
+              <div className="overview-section-kicker">Operator-approved movements</div>
+              <h2 id="overview-deployments-heading" className="overview-section-title"><Radio size={19} /> Active Deployments & Fast Actions</h2>
+              <p className="overview-section-subtitle">Approved resources, destinations, and current lifecycle</p>
+            </div>
+            <Link href="/allocations" className="overview-secondary-link">Resource Passports <ArrowRight size={14} /></Link>
+          </header>
+          <div className="overview-live-label"><span className="overview-live-dot" /> Live scenario data · simulated operations</div>
+
+          {activeAllocs.length > 0 ? (
+            <div className="overview-deployment-list">
+              {activeAllocs.slice(0, 5).map((allocation: any) => (
+                <article className="overview-deployment-row" key={allocation.id}>
+                  <div className="overview-deployment-main">
+                    <div>
+                      <h3>{allocation.resource_type?.replace(/_/g, " ")} <span>×{allocation.quantity}</span></h3>
+                      <p>{allocation.source_name || "Resource source"} <ArrowRight size={13} /> {allocation.destination_name || "Assigned destination"}</p>
+                    </div>
+                    <span className={`overview-deployment-status status-${allocation.status?.toLowerCase()}`}>{allocation.status?.replace(/_/g, " ")}</span>
+                  </div>
+                  <div className="overview-deployment-facts">
+                    <span><strong>{typeof allocation.route_distance_km === "number" ? `${allocation.route_distance_km.toFixed(1)} km` : "Route length unavailable"}</strong><small>route distance</small></span>
+                    <span><strong>{typeof allocation.route_travel_min === "number" ? `${Math.round(allocation.route_travel_min)} min` : "ETA unavailable"}</strong><small>estimated travel</small></span>
+                    {allocation.vehicle_name && <span><strong>{allocation.vehicle_name}</strong><small>assigned vehicle</small></span>}
+                  </div>
+                  <details className="overview-technical-details">
+                    <summary>Strategy reference</summary>
+                    <div className="overview-technical-grid"><span>Strategy ID</span><code>{allocation.strategy_id || "Unavailable"}</code><span>Resource ID</span><code>{allocation.id}</code></div>
+                  </details>
+                </article>
+              ))}
+              {activeAllocs.length > 5 && <Link href="/allocations" className="overview-secondary-link">View all {activeAllocs.length} approved/in-progress movements <ArrowRight size={14} /></Link>}
+            </div>
+          ) : (
+            <div className="overview-empty-message">
+              <strong>No approved deployments are currently in progress.</strong>
+              <span>Generated placements remain proposals until an operator approves a strategy.</span>
+            </div>
+          )}
+
+          {proposedAllocs.length > 0 && <div className="overview-proposal-notice"><strong>{proposedAllocs.length} proposed resource placement(s)</strong><span>Not dispatched · operator review and approval required</span></div>}
+
+          {activeAllocs.length === 0 && (
+            <div className="overview-demo-preview overview-deployment-demo">
+              <div className="overview-demo-heading">DEMO PREVIEW · SYNTHETIC · NOT LIVE</div>
+              {demoDeploymentPreview.map((item) => (
+                <div className="overview-demo-deployment" key={item.resource}>
+                  <div className="overview-demo-deployment-top"><strong>{item.resource} · {item.quantity}</strong><span>{item.status}</span></div>
+                  <div className="overview-demo-route">{item.source} <ArrowRight size={12} /> {item.destination}</div>
+                  <div className="overview-demo-facts">{item.distance} route · {item.eta} estimated travel</div>
+                </div>
+              ))}
+              <p className="overview-demo-disclaimer">Examples for demonstration only. They are not live dispatches, are excluded from counts, and have no active lifecycle controls.</p>
+            </div>
+          )}
+
+          <div className="overview-action-row">
+            <Link href="/strategy-lab" className="overview-primary-action"><Activity size={16} />{proposedAllocs.length > 0 ? "Review proposed plans" : "Generate response plan"}</Link>
+            <Link href="/simulation" className="overview-danger-action"><AlertOctagon size={15} />Open simulation</Link>
           </div>
-        </div>
+        </section>
       </div>
     </div>
   );

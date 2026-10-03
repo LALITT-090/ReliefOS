@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import axios from "axios";
 import { API_BASE_URL } from "@/lib/api";
+import { useReliefData } from "@/components/ReliefDataContext";
 import {
   List,
   CheckCircle,
@@ -20,102 +21,115 @@ import {
 } from "lucide-react";
 
 export default function ActiveAllocations() {
-  const [allocations, setAllocations] = useState<any[]>([]);
-  const [twin, setTwin] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const { allocations, loading, error, refreshSnapshot } = useReliefData();
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [selectedPassport, setSelectedPassport] = useState<any | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ type: "success" | "warning" | "error"; text: string } | null>(null);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
-      const [allocRes, twinRes] = await Promise.all([
-        axios.get(`${API_BASE_URL}/v1/allocations`),
-        axios.get(`${API_BASE_URL}/v1/twin`)
-      ]);
-      setAllocations(allocRes.data.allocations || []);
-      setTwin(twinRes.data);
-      setLoading(false);
-    } catch (err) {
-      console.error("Error loading allocations:", err);
+      await refreshSnapshot(true);
+      setActionMessage(null);
+    } catch {
+      setActionMessage({ type: "error", text: "The allocation snapshot could not be refreshed. Existing records may be out of date." });
     }
-  };
-
-  useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 3000);
-    return () => clearInterval(interval);
-  }, []);
+  }, [refreshSnapshot]);
 
   const updateStatus = async (id: string, newStatus: string) => {
     setUpdatingId(id);
+    setActionMessage(null);
     try {
       await axios.patch(`${API_BASE_URL}/v1/allocations/${id}/status`, {
         status: newStatus
       });
-      await loadData();
       if (selectedPassport?.id === id) {
         setSelectedPassport((prev: any) => ({ ...prev, status: newStatus }));
       }
+      try {
+        await refreshSnapshot(true);
+        setActionMessage({ type: "success", text: `Allocation updated to ${newStatus.replace("_", " ").toUpperCase()}.` });
+      } catch {
+        setActionMessage({ type: "warning", text: `Allocation updated to ${newStatus.replace("_", " ").toUpperCase()}, but its latest details could not be refreshed. Use refresh; listed records may be out of date.` });
+      }
     } catch (err: any) {
-      console.error("Failed to update allocation status:", err);
+      setActionMessage({ type: "error", text: err.response?.data?.detail || "The allocation status was not changed. Please retry." });
     } finally {
       setUpdatingId(null);
     }
   };
 
   const getStatusBadge = (status: string) => {
-    switch (status?.toLowerCase()) {
-      case "proposed":
-        return <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700">PROPOSED</span>;
-      case "approved":
-        return <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-950 text-blue-300 border border-blue-800">APPROVED</span>;
-      case "dispatched":
-        return <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-950 text-indigo-300 border border-indigo-800">DISPATCHED</span>;
-      case "in_transit":
-        return <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-950 text-amber-300 border border-amber-800 animate-pulse">IN TRANSIT</span>;
-      case "delivered":
-        return <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-300 border border-emerald-800">DELIVERED</span>;
-      case "verified":
-        return <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-teal-950 text-teal-300 border border-teal-800">VERIFIED</span>;
-      case "superseded":
-        return <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-950 text-rose-300 border border-rose-800">SUPERSEDED</span>;
-      case "cancelled":
-        return <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-rose-400 border border-slate-700">CANCELLED</span>;
-      default:
-        return <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-400">{status}</span>;
-    }
+    const normalized = status?.toLowerCase() || "unknown";
+    const tones: Record<string, { background: string; color: string; borderColor: string }> = {
+      proposed: { background: "#F5F7FA", color: "#374151", borderColor: "#D1D5DB" },
+      approved: { background: "#E7F5F4", color: "#0B6968", borderColor: "#99D8D4" },
+      dispatched: { background: "#EFF6FF", color: "#1D4ED8", borderColor: "#BFDBFE" },
+      in_transit: { background: "#FFF7ED", color: "#C2410C", borderColor: "#FDBA74" },
+      delivered: { background: "#F0FDF4", color: "#15803D", borderColor: "#BBF7D0" },
+      verified: { background: "#DCFCE7", color: "#166534", borderColor: "#86EFAC" },
+      superseded: { background: "#FEF2F2", color: "#B91C1C", borderColor: "#FECACA" },
+      cancelled: { background: "#F3F4F6", color: "#6B7280", borderColor: "#D1D5DB" },
+    };
+    return <span className="inline-flex rounded-md border px-2.5 py-1 text-[11px] font-extrabold tracking-wide" style={tones[normalized] || tones.proposed}>{normalized.replace(/_/g, " ").toUpperCase()}</span>;
   };
+
+  const getStatusExplanation = (status: string) => {
+    const explanations: Record<string, string> = {
+      proposed: "Awaiting operator approval",
+      approved: "Approved for dispatch",
+      dispatched: "Dispatched from the source facility",
+      in_transit: "Resource is currently moving",
+      delivered: "Resource reached destination",
+      verified: "Delivery confirmed",
+      superseded: "Replaced by a newer approved plan",
+      cancelled: "Movement cancelled",
+    };
+    return explanations[status?.toLowerCase()] || "Status unavailable";
+  };
+
+  const lifecycle = ["PROPOSED", "APPROVED", "DISPATCHED", "IN TRANSIT", "DELIVERED", "VERIFIED"];
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-12">
-      <div className="flex justify-between items-center bg-slate-800/80 p-5 rounded-xl border border-slate-700">
+      <div className="flex flex-col justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:flex-row sm:items-center">
         <div>
-          <h1 className="text-3xl font-bold text-white">Active Allocations & Resource Passport</h1>
-          <p className="text-slate-400 text-sm mt-1">
-            End-to-end lifecycle tracking: PROPOSED → APPROVED → DISPATCHED → IN TRANSIT → DELIVERED → VERIFIED. Click any record to inspect its cryptographic Resource Passport.
-          </p>
+          <div className="text-xs font-bold uppercase tracking-wider text-teal-700">Live resource movements</div>
+          <h1 className="mt-1 text-2xl font-bold text-slate-900">Active Allocations</h1>
+          <p className="mt-1 text-sm text-slate-600">Track every approved resource movement from proposal to delivery.</p>
+          <p className="mt-2 text-xs text-slate-500">Resource Passports provide traceability for each movement and its approved strategy.</p>
         </div>
         <button
           onClick={loadData}
-          className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-slate-200 border border-slate-600"
-          title="Refresh allocations"
+          disabled={updatingId !== null}
+          aria-label="Refresh active allocations"
+          className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-slate-200 border border-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
+          title="Refresh active allocations"
         >
           <RotateCw size={16} />
         </button>
       </div>
+
+      <section className="overflow-x-auto rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm" aria-label="Allocation lifecycle">
+        <div className="mb-3 text-[10px] font-bold uppercase tracking-wider text-slate-500">Movement lifecycle</div>
+        <ol className="flex min-w-[650px] items-center gap-2 text-[10px] font-extrabold tracking-wide text-slate-700 md:min-w-0">
+          {lifecycle.map((step, index) => <li key={step} className="flex flex-1 items-center gap-2"><span className="whitespace-nowrap rounded-md bg-slate-100 px-2.5 py-2">{step}</span>{index < lifecycle.length - 1 && <ArrowRight className="shrink-0 text-slate-400" size={14} aria-hidden="true" />}</li>)}
+        </ol>
+      </section>
+
+      {actionMessage && <div role={actionMessage.type === "error" ? "alert" : "status"} className={`rounded-lg border p-3 text-sm ${actionMessage.type === "error" ? "border-rose-300 bg-rose-50 text-rose-800" : actionMessage.type === "warning" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-green-200 bg-green-50 text-green-800"}`}>{actionMessage.text}</div>}
       
       <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden shadow-xl">
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left">
             <thead className="text-xs text-slate-400 bg-slate-900/90 uppercase border-b border-slate-700">
               <tr>
-                <th className="px-5 py-3.5">Passport ID</th>
+                <th className="px-5 py-3.5">Resource Passport</th>
                 <th className="px-5 py-3.5">Resource & Type</th>
                 <th className="px-5 py-3.5">Vehicle Unit</th>
                 <th className="px-5 py-3.5">Destination Node</th>
                 <th className="px-5 py-3.5">Distance / ETA</th>
                 <th className="px-5 py-3.5">Lifecycle Status</th>
-                <th className="px-5 py-3.5 text-right">Lifecycle Actions</th>
+                <th className="px-5 py-3.5 text-right">Next Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700/60">
@@ -126,7 +140,16 @@ export default function ActiveAllocations() {
                   </td>
                 </tr>
               )}
-              {!loading && allocations.length === 0 && (
+              {!loading && error && (
+                <tr>
+                  <td colSpan={7} className="px-6 py-8 text-center text-rose-700">
+                    {allocations.length > 0
+                      ? "The latest allocation snapshot could not be loaded. Showing the last successfully loaded records."
+                      : "Unable to load allocation records. Use refresh to retry."}
+                  </td>
+                </tr>
+              )}
+              {!loading && !error && allocations.length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-6 py-12 text-center text-slate-400">
                     No allocations created yet. Generate and approve a strategy in the Strategy Lab to deploy resources.
@@ -141,10 +164,18 @@ export default function ActiveAllocations() {
                   <tr
                     key={alloc.id}
                     onClick={() => setSelectedPassport(alloc)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedPassport(alloc);
+                      }
+                    }}
+                    tabIndex={0}
+                    aria-label={`Inspect ${alloc.resource_type?.replace("_", " ")} allocation to ${alloc.destination_name || "destination"}`}
                     className={`cursor-pointer transition ${isSelected ? "bg-blue-950/40 hover:bg-blue-950/50 border-l-4 border-l-blue-500" : "hover:bg-slate-700/30"}`}
                   >
-                    <td className="px-5 py-4 font-mono text-xs text-blue-400 font-bold">
-                      {alloc.id.substring(0, 8)}
+                    <td className="px-5 py-4 text-xs font-semibold text-teal-800">
+                      <span title={`Passport ID: ${alloc.id}`}>View passport</span>
                     </td>
                     <td className="px-5 py-4">
                       <div className="font-semibold text-white">
@@ -153,6 +184,7 @@ export default function ActiveAllocations() {
                       <div className="text-xs text-slate-400">
                         Qty: <strong>{alloc.quantity}</strong> {medLabel ? `(${medLabel})` : ""}
                       </div>
+                      <div className="mt-1 text-[10px] text-slate-500">Strategy proposal</div>
                     </td>
                     <td className="px-5 py-4 font-medium text-slate-300">
                       {alloc.vehicle_name || "N/A"}
@@ -171,44 +203,46 @@ export default function ActiveAllocations() {
                     </td>
                     <td className="px-5 py-4">
                       {getStatusBadge(alloc.status)}
+                      <div className="mt-1 max-w-40 text-[10px] leading-snug text-slate-600">{getStatusExplanation(alloc.status)}</div>
                     </td>
-                    <td className="px-5 py-4 text-right space-x-1.5" onClick={(e) => e.stopPropagation()}>
+                    <td className="px-5 py-4 text-right" onClick={(e) => e.stopPropagation()}>
                       {alloc.status === "approved" && (
                         <button
                           onClick={() => updateStatus(alloc.id, "dispatched")}
-                          disabled={updatingId === alloc.id}
-                          className="px-2.5 py-1 bg-indigo-900/70 hover:bg-indigo-800 text-indigo-200 text-xs rounded border border-indigo-700 transition"
+                          disabled={updatingId !== null}
+                          className="min-h-9 rounded-md border border-blue-700 bg-blue-700 px-3 text-xs font-bold text-white transition hover:bg-blue-800 disabled:opacity-60"
                         >
-                          Dispatch
+                          {updatingId === alloc.id ? "Updating…" : "DISPATCH"}
                         </button>
                       )}
                       {alloc.status === "dispatched" && (
                         <button
                           onClick={() => updateStatus(alloc.id, "in_transit")}
-                          disabled={updatingId === alloc.id}
-                          className="px-2.5 py-1 bg-amber-900/70 hover:bg-amber-800 text-amber-200 text-xs rounded border border-amber-700 transition"
+                          disabled={updatingId !== null}
+                          className="min-h-9 rounded-md border border-orange-700 bg-orange-600 px-3 text-xs font-bold text-white transition hover:bg-orange-700 disabled:opacity-60"
                         >
-                          In Transit
+                          {updatingId === alloc.id ? "Updating…" : "START TRANSIT"}
                         </button>
                       )}
                       {alloc.status === "in_transit" && (
                         <button
                           onClick={() => updateStatus(alloc.id, "delivered")}
-                          disabled={updatingId === alloc.id}
-                          className="px-2.5 py-1 bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200 text-xs rounded border border-emerald-700 transition"
+                          disabled={updatingId !== null}
+                          className="min-h-10 rounded-md border border-green-700 bg-green-700 px-4 text-xs font-extrabold text-white transition hover:bg-green-800 disabled:opacity-60"
                         >
-                          Deliver
+                          {updatingId === alloc.id ? "Updating…" : "DELIVER"}
                         </button>
                       )}
                       {alloc.status === "delivered" && (
                         <button
                           onClick={() => updateStatus(alloc.id, "verified")}
-                          disabled={updatingId === alloc.id}
-                          className="px-2.5 py-1 bg-teal-900/70 hover:bg-teal-800 text-teal-200 text-xs rounded border border-teal-700 transition"
+                          disabled={updatingId !== null}
+                          className="min-h-9 rounded-md border border-teal-700 bg-teal-700 px-3 text-xs font-bold text-white transition hover:bg-teal-800 disabled:opacity-60"
                         >
-                          Verify
+                          {updatingId === alloc.id ? "Updating…" : "VERIFY"}
                         </button>
                       )}
+                      {alloc.status === "verified" && <span className="text-xs font-extrabold text-green-800">COMPLETED</span>}
                     </td>
                   </tr>
                 );
@@ -230,6 +264,9 @@ export default function ActiveAllocations() {
             </div>
             <button
               onClick={() => setSelectedPassport(null)}
+              type="button"
+              title="Close Resource Passport"
+              aria-label="Close Resource Passport"
               className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-700"
             >
               <X size={18} />
@@ -273,4 +310,3 @@ export default function ActiveAllocations() {
     </div>
   );
 }
-
