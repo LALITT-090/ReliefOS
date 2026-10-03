@@ -30,18 +30,18 @@ export default function StrategyLab() {
   const [modifiedQuantities, setModifiedQuantities] = useState<Record<string, string>>({});
   const [operatorNote, setOperatorNote] = useState("");
   const [actionStatus, setActionStatus] = useState<{ type: "success" | "error" | "warning"; msg: string } | null>(null);
-  const scenarioVersionKey = `${twin?.scenario?.id || ""}:${twin?.state_version ?? ""}`;
+  const scenarioId = twin?.scenario?.id || "";
 
   useEffect(() => {
     setStrategies([]);
     setSelectedStrategy(null);
     setActionStatus(null);
     setModifyOpen(false);
-  }, [scenarioVersionKey]);
+  }, [scenarioId]);
 
   const generateStrategies = async () => {
     const requestedScenario = activeScenarioRef.current;
-    if (!requestedScenario?.id || requestedScenario.state_version == null) {
+    if (!requestedScenario?.id) {
       setActionStatus({ type: "error", msg: "No active scenario is confirmed. Refresh before generating strategies." });
       return;
     }
@@ -57,30 +57,47 @@ export default function StrategyLab() {
           axios.post(`${API_BASE_URL}/v1/strategies/generate`, {
             mode,
             scenario_id: requestedScenario.id,
-            state_version: requestedScenario.state_version,
+            state_version: requestedScenario.state_version ?? twin?.state_version ?? 1,
           })
         )
       );
 
-      const strategiesData = await Promise.all(
+      const strategiesData = await Promise.allSettled(
         results.map(res =>
           axios.get(`${API_BASE_URL}/v1/strategies/${res.data.strategy_id}`)
         )
       );
 
-      const fullData = strategiesData.map((res, index) => ({
-        ...res.data,
-        optimizationResult: results[index].data.result,
-      }));
+      const fullData = results.map((res, index) => {
+        const getSettled = strategiesData[index];
+        const getData = getSettled.status === "fulfilled" ? getSettled.value.data : null;
+        const optResult = res.data.result || {};
+        return {
+          strategy: getData?.strategy || {
+            id: res.data.strategy_id,
+            scenario_id: res.data.scenario_id,
+            mode: optResult.mode || modes[index],
+            score: optResult.score,
+            coverage_pct: optResult.coverage_pct,
+            unmet_demand: optResult.unmet_demand,
+            avg_eta_min: optResult.avg_eta_min,
+            avg_risk: optResult.avg_risk,
+            predicted_shortage_impact: optResult.predicted_shortage_impact,
+            is_feasible: optResult.is_feasible,
+            infeasibility_reason: optResult.infeasibility_reason,
+            status: "generated",
+            state_version: res.data.state_version,
+            decision: null,
+          },
+          allocations: getData?.allocations || optResult.allocations || [],
+          evidence: getData?.evidence || optResult.evidence_factors || [],
+          explanation: getData?.explanation || optResult.explanation_summary || "",
+          optimizationResult: optResult,
+        };
+      });
+
       const currentScenario = activeScenarioRef.current;
-      if (
-        currentScenario?.id !== requestedScenario.id ||
-        currentScenario?.state_version !== requestedScenario.state_version ||
-        fullData.some((item) =>
-          item.strategy?.scenario_id !== requestedScenario.id ||
-          item.strategy?.state_version !== requestedScenario.state_version
-        )
-      ) {
+      if (currentScenario?.id && currentScenario.id !== requestedScenario.id) {
         setStrategies([]);
         setSelectedStrategy(null);
         setActionStatus({ type: "warning", msg: "Scenario changed — generate a new strategy." });
